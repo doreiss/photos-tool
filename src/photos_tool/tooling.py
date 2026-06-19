@@ -28,6 +28,7 @@ REQUIRED_TOOLS: tuple[Tool, ...] = (
     Tool("osxphotos", required=True, purpose="export selected photos from the Photos library"),
     Tool("exiftool", required=True, purpose="embed and verify EXIF, GPS and date metadata"),
     Tool("ffmpeg", required=False, purpose="transcode HEVC video to H.264 MP4 (optional copies)"),
+    Tool("ffprobe", required=False, purpose="detect source video codec for optional MP4 copies"),
 )
 
 

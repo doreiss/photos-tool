@@ -21,6 +21,7 @@ class ExportOptions:
     exportdb: str | None = None
     exiftool: bool = True
     download_missing: bool = True
+    use_photokit: bool = False
     touch_file: bool = True
     retry: int = 3
     convert_to_jpeg: bool = False
@@ -49,6 +50,8 @@ def build_export_command(opts: ExportOptions) -> list[str]:
         cmd += ["--exiftool", "--exiftool-merge-keywords", "--exiftool-merge-persons"]
     if opts.download_missing:
         cmd.append("--download-missing")
+    if opts.use_photokit:
+        cmd.append("--use-photokit")
     if opts.touch_file:
         cmd.append("--touch-file")
     if opts.retry > 0:
