@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import re
 import shlex
 import shutil
+import socket
 import sys
 import tempfile
 import time
@@ -249,35 +251,28 @@ def _cmd_send(args: argparse.Namespace) -> int:
                     error=report.error,
                 )
                 return EXIT_CONVERSION
-            jpeg_reconciliation = summarize(jpeg_report, selected)
-            if not jpeg_reconciliation.ok:
+            # The compat pass exports photos only (--only-photos), so its count is
+            # legitimately lower than the selection; do not treat that as loss. The
+            # originals pass above is the safety-critical reconciliation. Still surface
+            # any real missing/errored compat rows as a non-fatal warning.
+            if jpeg_report.issue_count:
                 print(
-                    f"JPEG compatibility export error: {jpeg_reconciliation.message}",
+                    f"Warning: {jpeg_report.issue_count} compatibility-copy row(s) were "
+                    "missing or errored; your originals export is unaffected.",
                     file=sys.stderr,
                 )
-                _write_run_log(
-                    log_dir,
-                    started=started,
-                    exit_code=EXIT_CONVERSION,
-                    scope=scope,
-                    selected=selected,
-                    exported=reconciliation.exported,
-                    missing=report.missing,
-                    error=report.error,
-                    converted=jpeg_report.converted,
-                )
-                return EXIT_CONVERSION
 
         convert_summary = ConvertSummary()
         if mp4:
             try:
                 convert_summary = convert_videos(
                     destination,
+                    destination / "compat",
                     crf=config.copies.mp4_crf,
                     cache_path=log_dir / "video-codec-cache.json",
                 )
                 print(
-                    "MP4 copies: "
+                    "MP4 copies into compat/: "
                     f"{convert_summary.transcoded} transcoded, "
                     f"{convert_summary.skipped_live} Live Photo motion skipped, "
                     f"{convert_summary.skipped_existing} already current."
@@ -390,9 +385,15 @@ def _cmd_init(args: argparse.Namespace) -> int:
             return EXIT_USAGE
         smb_url = args.smb_url
         mount_point = args.mount_point
+        subpath = args.subpath if args.subpath is not None else _default_subpath()
     else:
         smb_url = input("SMB URL (for example smb://192.168.1.50/FamilyPhotos): ").strip()
         mount_point = input("Mount point (for example /Volumes/FamilyPhotos): ").strip()
+        default_subpath = _default_subpath()
+        entered = input(
+            f"Subfolder for THIS Mac (keeps each Mac's photos separate) [{default_subpath}]: "
+        ).strip()
+        subpath = entered or default_subpath
 
     if smb_url:
         try:
@@ -404,6 +405,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
     text = _render_config(
         smb_url=smb_url,
         mount_point=mount_point,
+        subpath=subpath,
         jpeg=args.jpeg,
         mp4=args.mp4,
     )
@@ -509,6 +511,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--non-interactive", action="store_true")
     p_init.add_argument("--smb-url")
     p_init.add_argument("--mount-point")
+    p_init.add_argument(
+        "--subpath",
+        default=None,
+        help="per-Mac subfolder on the share (default: this Mac's name; pass '' to disable)",
+    )
     p_init.add_argument("--jpeg", action="store_true", help="default to JPEG compatibility copies")
     p_init.add_argument("--mp4", action="store_true", help="default to MP4 compatibility copies")
     p_init.add_argument("--force", action="store_true", help="overwrite an existing config")
@@ -624,8 +631,10 @@ def _export_options(
     album: str | None,
     use_photokit: bool,
     *,
-    convert_to_jpeg: bool = False,
+    compat: bool = False,
 ) -> ExportOptions:
+    # The compat pass writes a Windows-friendly mirror: stills converted to JPEG,
+    # no Live Photo motion movies and no standalone movies (those become MP4s).
     return ExportOptions(
         destination=str(destination),
         scope=scope,
@@ -636,8 +645,10 @@ def _export_options(
         use_photokit=use_photokit,
         touch_file=True,
         retry=config.export.retry,
-        convert_to_jpeg=convert_to_jpeg,
+        convert_to_jpeg=compat,
         jpeg_quality=config.copies.jpeg_quality,
+        only_photos=compat,
+        skip_live=compat,
         directory_template=config.export.directory_template,
         filename_template=config.export.filename_template,
     )
@@ -694,7 +705,7 @@ def _run_jpeg_pass(
         scope,
         album,
         use_photokit,
-        convert_to_jpeg=True,
+        compat=True,
     )
     report_path = report_dir / "jpeg.json"
     result = run_export(opts, report_path)
@@ -826,11 +837,18 @@ def _print_captured(result: ExportResult) -> None:
         print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
 
 
-def _render_config(smb_url: str, mount_point: str, *, jpeg: bool, mp4: bool) -> str:
+def _default_subpath() -> str:
+    """A filesystem-safe per-Mac subfolder so family Macs do not collide on names."""
+    name = socket.gethostname().split(".")[0]
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")
+    return slug or "mac"
+
+
+def _render_config(smb_url: str, mount_point: str, subpath: str, *, jpeg: bool, mp4: bool) -> str:
     return f"""[destination]
 smb_url = {json.dumps(smb_url)}
 mount_point = {json.dumps(mount_point)}
-subpath = ""
+subpath = {json.dumps(subpath)}
 
 [export]
 directory_template = "{{created.year}}/{{created.mm}}"

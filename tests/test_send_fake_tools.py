@@ -371,6 +371,10 @@ def test_send_jpeg_runs_parallel_compat_export(tmp_path: Path, fake_tools, capsy
     assert len(exports) == 2
     assert Path(exports[1][1]) == mount / "compat"
     assert "--convert-to-jpeg" in exports[1]
+    # The compat pass is stills-only so it never drops broken HEVC movies in compat/.
+    assert "--only-photos" in exports[1]
+    assert "--skip-live" in exports[1]
+    assert "--only-photos" not in exports[0]
     assert "JPEG compatibility copies" in captured.out
 
 
@@ -394,24 +398,30 @@ def test_send_jpeg_failure_exits_five_after_original_export(tmp_path: Path, fake
     assert "JPEG compatibility export error" in captured.err
 
 
-def test_send_jpeg_missing_asset_exits_five(tmp_path: Path, fake_tools, capsys):
+def test_send_jpeg_fewer_compat_copies_is_not_fatal(tmp_path: Path, fake_tools, capsys):
+    # The compat pass is photos-only, so exporting fewer items than were selected is
+    # expected (videos are excluded) and must NOT fail the run. A real missing/errored
+    # compat row is surfaced as a non-fatal warning; the originals export still drives
+    # the exit code.
     mount = tmp_path / "share"
     mount.mkdir()
     config = write_config(tmp_path, mount)
     fake_tools(
         scenario(
             mount,
-            selected=1,
-            report=[row("asset-1")],
-            jpeg_report=[row("asset-1", exported=False, new=False, missing=True)],
+            selected=2,
+            report=[row("photo"), row("video")],
+            files=["2024/01/IMG_0001.HEIC", "2024/01/VID_0002.MOV"],
+            jpeg_report=[row("photo", converted=True)],
+            jpeg_files=["2024/01/IMG_0001.jpeg"],
         )
     )
 
     rc = cli.main(["send", "--config", str(config), "--jpeg"])
     captured = capsys.readouterr()
 
-    assert rc == 5
-    assert "JPEG compatibility export error" in captured.err
+    assert rc == 0
+    assert "JPEG compatibility export error" not in captured.err
 
 
 def test_send_mp4_transcodes_standalone_hevc_only(tmp_path: Path, fake_tools):
@@ -450,18 +460,20 @@ def test_send_mp4_transcodes_standalone_hevc_only(tmp_path: Path, fake_tools):
     assert exiftool_calls[0][-1].endswith("VID_0002.mp4")
 
 
-def test_send_jpeg_mp4_does_not_transcode_compat_tree(tmp_path: Path, fake_tools):
+def test_send_jpeg_mp4_transcodes_from_main_tree_into_compat(tmp_path: Path, fake_tools):
     mount = tmp_path / "share"
     mount.mkdir()
     config = write_config(tmp_path, mount)
     tools = fake_tools(
         scenario(
             mount,
-            selected=1,
-            report=[row("video")],
-            files=["2024/01/VID_0002.MOV"],
-            jpeg_report=[row("video", converted=True)],
-            jpeg_files=["2024/01/VID_0002.MOV"],
+            selected=2,
+            report=[row("photo"), row("video")],
+            files=["2024/01/IMG_0001.HEIC", "2024/01/VID_0002.MOV"],
+            jpeg_report=[row("photo", converted=True)],
+            # --only-photos means the compat pass would not write this movie; the fake
+            # honours that, so the only video on disk is in the pristine main tree.
+            jpeg_files=["2024/01/IMG_0001.jpeg", "2024/01/VID_0002.MOV"],
             codecs={"VID_0002.MOV": "hevc"},
         )
     )
@@ -474,7 +486,15 @@ def test_send_jpeg_mp4_does_not_transcode_compat_tree(tmp_path: Path, fake_tools
         if entry["tool"] == "ffmpeg" and "-i" in entry["argv"]
     ]
     assert len(ffmpeg_calls) == 1
-    assert "/compat/" not in " ".join(ffmpeg_calls[0])
+    argv = ffmpeg_calls[0]
+    source = argv[argv.index("-i") + 1]
+    output = argv[-1]
+    # Source is the pristine original; the H.264 copy lands in the compat/ mirror.
+    assert source.endswith("2024/01/VID_0002.MOV")
+    assert "/compat/" not in source
+    assert output.endswith("/compat/2024/01/VID_0002.mp4")
+    # The compat pass never created a video to re-transcode.
+    assert not (mount / "compat" / "2024" / "01" / "VID_0002.MOV").exists()
 
 
 def test_send_mp4_conversion_error_exits_five(tmp_path: Path, fake_tools, capsys):

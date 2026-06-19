@@ -57,7 +57,17 @@ def is_live_photo_motion(video: Path) -> bool:
     )
 
 
-def convert_videos(root: Path, crf: int = 20, cache_path: Path | None = None) -> ConvertSummary:
+def convert_videos(
+    root: Path,
+    compat_root: Path,
+    crf: int = 20,
+    cache_path: Path | None = None,
+) -> ConvertSummary:
+    """Transcode standalone HEVC videos in ``root`` to H.264 MP4s under ``compat_root``.
+
+    The originals tree stays pristine; the Windows-friendly ``.mp4`` mirror lands in
+    ``compat_root`` at the same relative path. Live Photo motion clips are skipped.
+    """
     summary = ConvertSummary()
     cache = _load_cache(cache_path)
     cache_changed = False
@@ -66,7 +76,7 @@ def convert_videos(root: Path, crf: int = 20, cache_path: Path | None = None) ->
         if is_live_photo_motion(video):
             summary = _add(summary, skipped_live=1)
             continue
-        output = video.with_suffix(".mp4")
+        output = (compat_root / video.relative_to(root)).with_suffix(".mp4")
         if _is_output_current(video, output):
             summary = _add(summary, skipped_existing=1)
             continue
