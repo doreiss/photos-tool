@@ -546,6 +546,82 @@ def test_send_warns_when_no_per_mac_subpath(tmp_path: Path, fake_tools, capsys):
     assert "no per-Mac subpath is set" in captured.err
 
 
+def test_send_remove_originals_after_clean_export(tmp_path: Path, fake_tools, monkeypatch, capsys):
+    from photos_tool.remove import RemoveResult
+
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)
+    fake_tools(scenario(mount, selected=2, report=[row("a"), row("b")]))
+
+    seen: dict[str, object] = {}
+
+    def fake_remove(uuids, *, dry_run=False, max_delete=500):
+        ids = sorted(uuids)
+        seen["uuids"] = ids
+        return RemoveResult(requested=len(ids), deleted=len(ids), dry_run=dry_run)
+
+    monkeypatch.setattr(cli, "remove_originals", fake_remove)
+
+    rc = cli.main(["send", "--config", str(config), "--remove-originals", "--yes"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert seen["uuids"] == ["a", "b"]
+    assert "Moved 2 original(s) to Recently Deleted" in captured.out
+    assert (tmp_path / "state" / "logs" / "removed.jsonl").exists()
+
+
+def test_send_remove_originals_blocked_when_not_clean(tmp_path: Path, fake_tools, monkeypatch):
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)
+    fake_tools(
+        scenario(
+            mount,
+            selected=2,
+            report=[row("a"), row("b", exported=False, new=False, missing=True)],
+        )
+    )
+
+    called: list[object] = []
+    monkeypatch.setattr(cli, "remove_originals", lambda *a, **k: called.append(1))
+
+    rc = cli.main(["send", "--config", str(config), "--remove-originals", "--yes"])
+
+    # A skipped/missing export exits 3 and must never trigger a delete.
+    assert rc == 3
+    assert called == []
+
+
+def test_send_remove_dry_run_deletes_nothing(tmp_path: Path, fake_tools, monkeypatch, capsys):
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)
+    fake_tools(scenario(mount, selected=1, report=[row("a")]))
+
+    from photos_tool.remove import RemoveResult
+
+    calls: list[bool] = []
+
+    def fake_remove(uuids, *, dry_run=False, max_delete=500):
+        calls.append(dry_run)
+        ids = sorted(uuids)
+        return RemoveResult(requested=len(ids), deleted=0 if dry_run else len(ids), dry_run=dry_run)
+
+    monkeypatch.setattr(cli, "remove_originals", fake_remove)
+
+    rc = cli.main(
+        ["send", "--config", str(config), "--remove-originals", "--remove-dry-run", "--yes"]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    # The dry run verifies resolvability with dry_run=True and deletes nothing.
+    assert calls == [True]
+    assert "Remove dry run" in captured.out
+
+
 def test_doctor_runs_fake_preflight_and_dry_run(tmp_path: Path, fake_tools, capsys):
     mount = tmp_path / "share"
     mount.mkdir()

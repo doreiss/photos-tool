@@ -35,6 +35,8 @@ from .osxphotos_runner import (
     run_export,
 )
 from .plan import ExportOptions, build_export_command
+from .reconcile import Reconciliation
+from .remove import RemoveError, gate_cleanup, remove_originals
 from .report import (
     ReportError,
     ReportSummary,
@@ -323,6 +325,10 @@ def _cmd_send(args: argparse.Namespace) -> int:
             exiftool_error=report.exiftool_error,
             exiftool_warning=report.exiftool_warning,
         )
+
+        if _override(args.remove_originals, config.remove.enabled) and exit_code == EXIT_OK:
+            _maybe_remove_originals(report, reconciliation, config, args, log_dir)
+
         return exit_code
 
 
@@ -575,6 +581,22 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--jpeg", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--mp4", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--use-photokit", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument(
+        "--remove-originals",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="after a clean export, move the exported originals to Recently Deleted",
+    )
+    parser.add_argument(
+        "--remove-dry-run",
+        action="store_true",
+        help="with --remove-originals, only report what would be removed",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="skip the interactive confirmation before removing originals",
+    )
 
 
 def _print_tool_statuses(statuses: Sequence[ToolStatus]) -> None:
@@ -637,6 +659,67 @@ def _acquire_destination_lock(exportdb_dir: Path, destination: Path):
         handle.close()
         return None
     return handle
+
+
+def _maybe_remove_originals(
+    report: ReportSummary,
+    reconciliation: Reconciliation,
+    config: Config,
+    args: argparse.Namespace,
+    log_dir: Path,
+) -> None:
+    allowed, reason = gate_cleanup(reconciliation, report)
+    if not allowed:
+        print(f"Not removing originals: {reason}.", file=sys.stderr)
+        return
+    uuids = sorted(report.exported_uuids or [])
+    if args.remove_dry_run:
+        # Verify the assets actually resolve in Photos (mapping + authorization) but
+        # delete nothing — the safe preview before a real removal.
+        try:
+            result = remove_originals(uuids, dry_run=True, max_delete=config.remove.max_delete)
+        except RemoveError as exc:
+            print(f"Remove dry run could not verify originals: {exc}", file=sys.stderr)
+            return
+        print(
+            f"Remove dry run: {result.requested} original(s) resolve in Photos and would move to "
+            "Recently Deleted (recoverable ~30 days). Nothing was deleted."
+        )
+        return
+    print(f"\n{len(uuids)} original(s) reconciled as safely exported.")
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print(
+                "Refusing to remove originals without confirmation; pass --yes or run "
+                "interactively.",
+                file=sys.stderr,
+            )
+            return
+        answer = (
+            input(f"Move {len(uuids)} originals to Recently Deleted (recoverable ~30 days)? [y/N] ")
+            .strip()
+            .lower()
+        )
+        if answer not in {"y", "yes"}:
+            print("Left originals in Photos.")
+            return
+    try:
+        result = remove_originals(uuids, dry_run=False, max_delete=config.remove.max_delete)
+    except RemoveError as exc:
+        print(f"Could not remove originals: {exc}", file=sys.stderr)
+        return
+    print(f"Moved {result.deleted} original(s) to Recently Deleted (recoverable ~30 days).")
+    _log_removed(log_dir, uuids)
+
+
+def _log_removed(log_dir: Path, uuids: Sequence[str]) -> None:
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "count": len(uuids),
+        "removed_uuids": list(uuids),
+    }
+    with (log_dir / "removed.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, sort_keys=True) + "\n")
 
 
 def _export_options(

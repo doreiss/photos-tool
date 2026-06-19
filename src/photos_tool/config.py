@@ -60,11 +60,18 @@ class StateConfig:
 
 
 @dataclass(frozen=True)
+class RemoveConfig:
+    enabled: bool = False
+    max_delete: int = 500
+
+
+@dataclass(frozen=True)
 class Config:
     destination: DestinationConfig = DestinationConfig()
     export: ExportConfig = ExportConfig()
     copies: CopiesConfig = CopiesConfig()
     state: StateConfig = StateConfig()
+    remove: RemoveConfig = RemoveConfig()
 
     def destination_path(self, override: str | None = None) -> Path:
         """Return the final export destination, including any configured subpath."""
@@ -117,6 +124,7 @@ def load_config(path: str | Path | None = None) -> Config:
         export=_parse_export(_table(raw, "export")),
         copies=_parse_copies(_table(raw, "copies")),
         state=_parse_state(_table(raw, "state")),
+        remove=_parse_remove(_table(raw, "remove")),
     )
 
 
@@ -170,6 +178,16 @@ def _parse_state(raw: dict[str, Any]) -> StateConfig:
     return StateConfig(
         exportdb_dir=_str(raw, "exportdb_dir", StateConfig().exportdb_dir),
         log_dir=_str(raw, "log_dir", StateConfig().log_dir),
+    )
+
+
+def _parse_remove(raw: dict[str, Any]) -> RemoveConfig:
+    max_delete = _int(raw, "max_delete", 500)
+    if max_delete < 1:
+        raise ConfigError("remove.max_delete must be at least 1")
+    return RemoveConfig(
+        enabled=_bool(raw, "enabled", False),
+        max_delete=max_delete,
     )
 
 
