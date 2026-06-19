@@ -11,6 +11,10 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Dominic Reiss" }]
 keywords = ["photos", "osxphotos", "macos", "windows", "smb", "exif"]
+dependencies = [
+  'osxphotos==0.76.1; sys_platform == "darwin"',
+  'tomli>=2.0; python_version < "3.11"',
+]
 
 [project.optional-dependencies]
 dev = ["ruff>=0.6.0", "pyright>=1.1.380", "pytest>=8.0"]
@@ -38,3 +42,8 @@ typeCheckingMode = "standard"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+  "requires_sips: needs the macOS sips image tool",
+  "requires_exiftool: needs the real exiftool binary",
+  "requires_ffmpeg: needs the real ffmpeg/ffprobe binaries",
+]

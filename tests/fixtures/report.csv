@@ -1,0 +1,3 @@
+datetime,filename,exported,new,updated,skipped,converted_to_jpeg,missing,error
+2024-01-01T00:00:00,/Volumes/FamilyPhotos/2024/01/IMG_0001.HEIC,True,True,False,False,False,False,False
+2024-01-01T00:00:00,/Volumes/FamilyPhotos/2024/01/IMG_0002.HEIC,False,False,False,True,False,False,False

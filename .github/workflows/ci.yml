@@ -24,6 +24,12 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: pyright
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+      - run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+      - run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - run: actionlint
       - run: shellcheck scripts/*.sh
 
   test:
@@ -62,8 +68,8 @@ jobs:
         run: pytest
       - name: Install the real external toolchain
         run: |
-          brew install exiftool
-          pip install osxphotos
+          brew install exiftool ffmpeg
+          pip install osxphotos==0.76.1
       - name: Smoke-test the toolchain on a clean arm64 Mac
         run: |
           echo "arch: $(uname -m)"
@@ -71,4 +77,7 @@ jobs:
           python -c "import sys; assert sys.version_info >= (3, 10); print('python', sys.version)"
           osxphotos --version
           exiftool -ver
+          ffmpeg -version
           photos-tool check
+      - name: Run marker-gated real-tool tests
+        run: pytest -m "requires_sips or requires_exiftool or requires_ffmpeg"

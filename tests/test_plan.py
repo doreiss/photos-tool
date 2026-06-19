@@ -41,3 +41,9 @@ def test_destination_is_required():
 def test_retry_omitted_when_zero():
     cmd = build_export_command(ExportOptions(destination="/d", retry=0))
     assert "--retry" not in cmd
+
+
+def test_use_photokit_can_modify_download_missing():
+    cmd = build_export_command(ExportOptions(destination="/d", use_photokit=True))
+    assert "--use-photokit" in cmd
+    assert "--download-missing" in cmd
