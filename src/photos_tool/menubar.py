@@ -72,7 +72,17 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
                 exe, album=album, jpeg=bool(self.jpeg.state), mp4=bool(self.mp4.state)
             )
             try:
-                code = subprocess.run(argv, env=env, check=False).returncode
+                # A GUI app has no terminal; fully detach the child's stdio so a
+                # background launch can't be suspended (SIGTTIN/SIGTTOU) when
+                # osxphotos writes its progress bar. The exit code drives the result.
+                code = subprocess.run(
+                    argv,
+                    env=env,
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ).returncode
             except OSError as exc:
                 rumps.notification("Could not run photos-tool", "", str(exc))
                 return
@@ -95,7 +105,12 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
             # terminal, so capture the output and show it in a dialog.
             try:
                 proc = subprocess.run(
-                    [exe, "doctor"], env=env, capture_output=True, text=True, check=False
+                    [exe, "doctor"],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    stdin=subprocess.DEVNULL,
                 )
             except OSError as exc:
                 rumps.alert("Diagnostics failed", str(exc))
