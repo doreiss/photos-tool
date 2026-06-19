@@ -4,9 +4,10 @@
 
 Send selected photos and videos from the Apple Photos app on a Mac to a Windows PC
 on the same home network — with full metadata, Live Photos, dedup, and album/date
-folders. Built for family use, not the public.
+folders. Built so several family Macs can back up to one Windows share, by people
+who don't touch a terminal.
 
-> Status: CLI implementation with portable fake-tool coverage. The real Mac +
+> Status: CLI + menu-bar app with portable fake-tool coverage. The real Mac +
 > Windows path is verified by the manual smoke test in `docs/manual-test.md`.
 
 ## How it works
@@ -16,82 +17,123 @@ by [osxphotos](https://github.com/RhetTbull/osxphotos). The transfer is a built-
 Windows file share. This project is the thin, safe wrapper that ties them together:
 
 ```
-Photos app (select) -> hotkey/Shortcut -> photos-tool -> osxphotos export -> mounted SMB share -> Windows folders
+Photos app (select) -> menu-bar / hotkey -> photos-tool -> osxphotos export -> mounted SMB share -> Windows folders
 ```
 
 - `osxphotos export --selected` reads whatever is highlighted in Photos right now.
 - `--update` makes it incremental and resumable (never re-copies what's already sent).
 - `--exiftool` embeds EXIF / GPS / dates; Live Photos and videos export by default.
-- Optional JPEG/MP4 copies for Windows machines without the HEIC/HEVC codecs.
+- A clean, selected-vs-exported reconciliation by UUID catches silently-skipped
+  iCloud photos and reports them (exit code 3) instead of a false success.
 
-See `docs/windows-setup.md`, `docs/manual-test.md`, and
-`docs/implementation-audit.md` for the operator setup, the one manual test CI
-cannot perform, and the current evidence checklist.
+### What lands on the share
+
+Each Mac writes to its **own** subfolder (named after the Mac) so photos from two
+iPhones can't collide on names like `IMG_0001`:
+
+```
+<share>/<this-mac>/2024/06/IMG_0001.heic          # pristine Apple originals (the archive)
+<share>/<this-mac>/2024/08/IMG_0002.heic + .mov   # Live Photo pair
+<share>/<this-mac>/compat/2024/06/IMG_0001.jpeg   # optional Windows-friendly mirror
+<share>/<this-mac>/compat/2024/09/VID_0003.mp4    #   (point Windows Explorer here)
+```
+
+The optional `compat/` tree (`--jpeg`/`--mp4`) is a fully Windows-openable mirror —
+JPEG for every still, H.264 MP4 for every standalone video, no HEVC `.mov` — so a
+Windows PC with no codecs can browse `compat/` while the main tree stays original.
+
+## Install (each family Mac)
+
+```bash
+brew install exiftool          # required (metadata); add ffmpeg for MP4 copies:
+brew install ffmpeg            # optional, only if you want --mp4
+
+uv tool install photos-tool                 # recommended (or: pipx install photos-tool)
+uv tool install 'photos-tool[gui]'          # ...with the 📷 menu-bar app
+# bleeding edge: uv tool install 'git+https://github.com/doreiss/photos-tool'
+```
+
+`osxphotos` is pinned and installed automatically on macOS.
+
+## Set up (once per Mac)
+
+```bash
+photos-tool init       # asks for the SMB URL, mount point, and a per-Mac subfolder
+                       # (defaults to this Mac's name — keep it unless you have a reason)
+```
+
+Then, the three one-time macOS grants (all in `docs/windows-setup.md`):
+
+1. **Finder → Connect to Server →** `smb://<pc>/<share>`, log in, and check
+   "Remember this password in my keychain" (no password is ever stored by this tool).
+2. **Full Disk Access** for the app that runs photos-tool (Terminal, or the menu-bar
+   app), in System Settings → Privacy & Security. Quit and relaunch it after.
+3. **Download Originals to this Mac** (Photos → Settings → iCloud) and let it finish,
+   so you don't export low-res placeholders.
+
+Then `photos-tool doctor` should be all green.
+
+## Send
+
+- **Menu bar (easiest):** run `photos-tool-menubar`, select photos in Photos, click
+  📷 → **Send Selected Photos**. A notification tells you the result.
+- **Hotkey:** `photos-tool install-shortcut` writes a launcher; put it in a one-action
+  macOS Shortcut and bind a key. The notification maps the exit code to plain English.
+- **Terminal:** `photos-tool send` (add `--jpeg --mp4` for the Windows-friendly mirror).
+
+### Free space on the Mac after a backup (opt-in)
+
+```bash
+photos-tool send --remove-originals --remove-dry-run   # preview: what would be removed
+photos-tool send --remove-originals                    # move exported originals to Recently Deleted
+```
+
+This only runs after a clean reconciliation, removes exactly the photos confirmed on
+the share, aborts if any don't resolve, and sends them to **Recently Deleted
+(recoverable ~30 days)** via PhotoKit. It needs a one-time **Photos** permission grant.
 
 ## What CI proves (and what it can't)
 
-CI runs on GitHub's macOS runners, which are genuinely Apple Silicon (arm64). It gives
-real confidence that this works on a **generic Apple Silicon MacBook**:
+CI runs on GitHub's macOS runners, which are genuinely Apple Silicon (arm64):
 
-- ✅ The package, `osxphotos`, and `exiftool` install and run on a clean arm64 Mac.
-- ✅ The wrapper logic — config parsing, report parsing, command construction,
-  SMB checks, conversion selection, and the selected-vs-exported reconciliation
-  that catches silently-skipped iCloud photos — is unit-tested and type-checked.
-- ✅ The full `send` orchestration runs in CI with fake `osxphotos`, `ffmpeg`,
-  `ffprobe`, `exiftool`, `mount`, and `osascript` binaries on PATH.
-- ✅ Marker-gated real-tool tests run on macOS when `ffmpeg`/`exiftool` are present.
+- ✅ The package, `osxphotos`, and `exiftool` install and run on a clean arm64 Mac,
+  and the built wheel installs cleanly (the `uv tool install` path).
+- ✅ The wrapper logic — config, report parsing, command construction, SMB checks,
+  conversion selection, the UUID reconciliation, the cleanup gate, and the GUI's
+  exit-code mapping — is unit-tested and type-checked.
+- ✅ The full `send` pipeline runs with fake `osxphotos`/`ffmpeg`/`exiftool`/`mount`/
+  `osascript` binaries, plus marker-gated real-tool tests on macOS.
 
-It deliberately does **not** claim to test the end-to-end export, because a CI runner
-has no Photos library, no GUI selection, and no Full Disk Access. That step is verified
-by a documented manual smoke test on a real Mac.
-
-## Requirements
-
-- Apple Silicon Mac, macOS 13+ (developed on macOS 26).
-- Python 3.10+.
-- `osxphotos==0.76.1` and `exiftool` (`osxphotos` is pinned by this package on
-  macOS; `brew install exiftool` installs the metadata tool).
-- `ffmpeg` only if you want MP4 video copies (`brew install ffmpeg`).
+It deliberately does **not** test the end-to-end export (no Photos library, no GUI
+selection, no Full Disk Access on a runner). That is the manual smoke test on a real Mac.
 
 ## Develop
 
 ```bash
-scripts/check.sh        # creates .venv, runs ruff + pyright + pytest (mirrors CI)
-photos-tool check       # verify the external tools are installed
-photos-tool init --non-interactive --smb-url smb://192.168.1.50/FamilyPhotos --mount-point /Volumes/FamilyPhotos
-photos-tool install-shortcut
-photos-tool doctor      # diagnose tools, permissions, share, and iCloud risk
-photos-tool send --dry-run
-photos-tool send
-photos-tool send --jpeg --mp4
-photos-tool sanitize-report ~/.local/state/photos-tool/logs/REPORT.json tests/fixtures/report_real_sanitized.json
-photos-tool plan /Volumes/FamilyPhotos          # print the export command (runs nothing)
-photos-tool plan /Volumes/FamilyPhotos --album "Summer Trip" --jpeg
+scripts/check.sh                          # ruff + pyright + pytest + actionlint + shellcheck
+photos-tool plan /Volumes/Share           # print the exact osxphotos command (runs nothing)
 ```
 
-Before bumping `osxphotos`, rerun the manual smoke test. Its report format is part
-of the safety contract.
+Before bumping `osxphotos`, rerun the manual smoke test — its report format is part of
+the safety contract (`tests/fixtures/report_real_sanitized.json` is a captured real one).
 
-## Before the first real run (the traps that silently lose photos)
+## Releasing to PyPI
 
-1. Turn off iCloud "Optimize Mac Storage" (Photos → Settings → iCloud →
-   "Download Originals to this Mac") and let it finish — otherwise you export
-   low-res placeholders.
-2. Grant Full Disk Access to the terminal/app that launches `osxphotos`.
-3. On Windows, share a folder to an authenticated user account, not guest
-   (Windows 11 24H2 disables guest shares and requires SMB signing).
-4. To view HEIC/HEVC on Windows, install the free HEIF + paid ($0.99) HEVC
-   extensions, or use VLC — or send JPEG/MP4 copies.
+Tag `vX.Y.Z` (matching `pyproject.toml`); `.github/workflows/release.yml` builds and
+publishes via PyPI Trusted Publishing (OIDC, no token). One-time: register a pending
+publisher on pypi.org (project `photos-tool`, owner `doreiss`, workflow `release.yml`,
+environment `pypi`) before the first tag.
 
 ## Roadmap
 
-- [x] Project scaffold + Apple Silicon CI.
-- [x] Tool detection, export-command builder, count reconciliation (tested).
-- [x] `send` command: run the export, parse the osxphotos report, reconcile counts.
-- [x] Optional JPEG (osxphotos parallel `compat/` export) and MP4 (ffmpeg) compatibility copies with
-      metadata copy-through.
-- [x] macOS Shortcut + hotkey trigger documentation; documented manual smoke test.
-- [ ] Optional menu-bar launcher.
+- [x] Tool detection, export-command builder, UUID reconciliation.
+- [x] `send`: export, parse the osxphotos report, reconcile, run log.
+- [x] Coherent `compat/` mirror (JPEG stills + H.264 MP4s); pristine originals tree.
+- [x] Per-Mac subpath so several Macs share one Windows folder safely.
+- [x] Opt-in Mac-side cleanup (move exported originals to Recently Deleted).
+- [x] 📷 menu-bar app; macOS Shortcut + hotkey; documented manual smoke test.
+- [x] PyPI Trusted-Publishing release + clean-install CI.
+- [ ] Signed/notarized `.app` bundle of the menu-bar app.
 
 ## License
 
