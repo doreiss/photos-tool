@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "photos-tool"
+version = "0.0.1"
+description = "Send selected Apple Photos from a Mac to a Windows PC on the same LAN, with metadata intact."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Dominic Reiss" }]
+keywords = ["photos", "osxphotos", "macos", "windows", "smb", "exif"]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.6.0", "pyright>=1.1.380", "pytest>=8.0"]
+
+[project.scripts]
+photos-tool = "photos_tool.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/photos_tool"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pyright]
+include = ["src", "tests"]
+extraPaths = ["src"]
+pythonVersion = "3.10"
+typeCheckingMode = "standard"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

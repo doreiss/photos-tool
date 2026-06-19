@@ -1,0 +1,17 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store
+
+# osxphotos state and reports — NEVER commit (these hold GPS coordinates + person names)
+.osxphotos_export.db
+*.osxphotos_export.db
+report*.csv
