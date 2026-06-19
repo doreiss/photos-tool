@@ -130,7 +130,7 @@ def _table(raw: dict[str, Any], name: str) -> dict[str, Any]:
 def _parse_destination(raw: dict[str, Any]) -> DestinationConfig:
     smb_url = _str(raw, "smb_url", "")
     if smb_url:
-        _validate_smb_url(smb_url)
+        validate_smb_url(smb_url)
     return DestinationConfig(
         smb_url=smb_url,
         mount_point=_str(raw, "mount_point", ""),
@@ -201,7 +201,7 @@ def _float(raw: dict[str, Any], key: str, default: float) -> float:
     return float(value)
 
 
-def _validate_smb_url(value: str) -> None:
+def validate_smb_url(value: str) -> None:
     parsed = urlparse(value)
     if parsed.scheme != "smb" or not parsed.hostname or not parsed.path.strip("/"):
         raise ConfigError("destination.smb_url must look like smb://server/Share")
