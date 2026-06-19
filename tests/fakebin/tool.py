@@ -36,7 +36,12 @@ def _osxphotos(scenario: dict) -> int:
         if scenario.get("auth_error"):
             print("Operation not permitted", file=sys.stderr)
             return 1
-        print(int(scenario.get("selected", 0)))
+        count = int(scenario.get("selected", 0))
+        if count == 0 and "--selected" in args:
+            # Mirror real osxphotos: empty selection exits non-zero with a help message.
+            print("--selected option used but no photos selected in Photos.", file=sys.stderr)
+            return 1
+        print(count)
         return 0
     if args[:1] == ["export"]:
         if "--cleanup" in args:

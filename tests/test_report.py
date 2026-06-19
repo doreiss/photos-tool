@@ -204,3 +204,21 @@ def test_sanitize_csv_report_removes_paths_and_raw_uuids(tmp_path: Path):
     assert "/sanitized/file-" in text
     assert ".HEIC" in text
     assert "<redacted>" in text
+
+
+def test_authoritative_real_report_parses_without_warnings():
+    # Captured from a real osxphotos 0.76.1 export (5 files: 2 stills, 1 video, and a
+    # Live Photo whose .heic + .mov share one uuid -> 4 distinct assets).
+    report = parse_report(FIXTURES / "report_real_sanitized.json")
+
+    assert report.total_files == 5
+    assert report.exported == 5
+    assert report.exported_uuids is not None
+    assert len(report.exported_uuids) == 4
+    # No spurious column warnings against the real 0.76.1 schema.
+    assert unexpected_columns(report) == frozenset()
+    assert missing_expected_columns(report) == frozenset()
+
+    reconciliation = summarize(report, selected_assets=4)
+    assert reconciliation.ok
+    assert reconciliation.status is Status.OK

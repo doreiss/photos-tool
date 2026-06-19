@@ -50,6 +50,11 @@ def count_assets(scope: str = "selected", album: str | None = None, timeout: flo
 
     result = _run(cmd, timeout=timeout)
     if result.returncode != 0:
+        # osxphotos exits non-zero with a help message (no count) when the live
+        # selection is empty; treat that as zero rather than a hard error.
+        combined = f"{result.stdout}\n{result.stderr}".lower()
+        if scope == "selected" and "no photos selected" in combined:
+            return 0
         _raise_osxphotos(cmd, result)
     text = (result.stdout or result.stderr).strip().splitlines()
     for line in reversed(text):
@@ -78,6 +83,13 @@ def run_export(
         cmd.extend(extra)
     if "--cleanup" in cmd:
         raise ValueError("photos-tool must never pass osxphotos --cleanup")
+
+    # osxphotos refuses a destination that does not yet exist (even on --dry-run);
+    # create it first so the compat/ subtree and per-Mac subpaths just work.
+    try:
+        Path(opts.destination).mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise OsxphotosError(f"could not create destination {opts.destination}: {exc}") from exc
 
     result = _run(cmd, timeout=timeout)
     return ExportResult(

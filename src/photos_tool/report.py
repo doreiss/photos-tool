@@ -59,6 +59,11 @@ EXPECTED_REPORT_COLUMNS = {
     "uuid",
     "converted_to_jpeg",
     "xmp_sidecar",
+    "cleanup_deleted_directory",
+    "cleanup_deleted_file",
+    "exported_album",
+    "extended_attributes_skipped",
+    "extended_attributes_written",
 }
 
 REQUIRED_REPORT_COLUMNS = {
@@ -72,6 +77,8 @@ EXPECTED_REPORT_PREFIXES = (
     "aae_",
     "sidecar_",
     "user_",
+    "cleanup_",
+    "extended_attributes_",
 )
 
 
