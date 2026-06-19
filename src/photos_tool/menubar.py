@@ -18,6 +18,14 @@ from .gui_actions import build_send_argv, map_exit_code
 
 
 def _executable() -> str:
+    # Prefer the photos-tool console script installed right next to this menubar
+    # script (same venv / app bundle) so the GUI always drives its own versioned
+    # CLI, not some other photos-tool on PATH (e.g. a stale pyenv shim). Fall back
+    # to PATH. subprocess resolves a relative name via the parent PATH (not our
+    # augmented env), so always return an absolute path when we have one.
+    sibling = Path(sys.argv[0]).resolve().parent / "photos-tool"
+    if sibling.exists():
+        return str(sibling)
     return shutil.which("photos-tool") or "photos-tool"
 
 
