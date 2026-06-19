@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import shlex
 import shutil
@@ -14,7 +15,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__
-from .config import Config, ConfigError, default_config_path, load_config, resolved_exportdb_path
+from .config import (
+    Config,
+    ConfigError,
+    default_config_path,
+    load_config,
+    resolved_exportdb_path,
+    validate_smb_url,
+)
 from .convert import ConversionError, ConvertSummary, convert_videos
 from .osxphotos_runner import (
     ExportResult,
@@ -159,6 +167,18 @@ def _cmd_send(args: argparse.Namespace) -> int:
     if args.dry_run:
         return _send_dry_run(opts, selected)
 
+    # Guard against a double-pressed hotkey launching two overlapping exports to
+    # the same share. The handle is held for the rest of this run; the OS releases
+    # the flock when the process exits or the handle is closed.
+    lock = _acquire_destination_lock(exportdb_dir, destination)
+    if lock is None:
+        print(
+            "Another photos-tool send is already running for this destination; "
+            "wait for it to finish and retry.",
+            file=sys.stderr,
+        )
+        return EXIT_PREFLIGHT
+
     log_dir.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="photos-tool-report-") as tmp:
@@ -290,6 +310,8 @@ def _cmd_send(args: argparse.Namespace) -> int:
             error=report.error,
             converted=jpeg_report.converted if jpeg_report else 0,
             mp4=convert_summary.transcoded,
+            exiftool_error=report.exiftool_error,
+            exiftool_warning=report.exiftool_warning,
         )
         return exit_code
 
@@ -318,6 +340,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     else:
         print(f"[pass] destination writable: {destination}")
 
+    selected = 0
     try:
         selected = count_assets()
         print(f"[pass] Photos selection readable: {selected} selected")
@@ -328,23 +351,31 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         else:
             print(f"[fail] Photos readable: {exc}")
 
-    try:
-        exportdb_dir = Path(config.state.exportdb_dir).expanduser()
-        exportdb_dir.mkdir(parents=True, exist_ok=True)
-        opts = _export_options(
-            config,
-            destination,
-            exportdb_dir,
-            "selected",
-            None,
-            config.export.use_photokit,
+    # The dry-run heuristic only means something when real photos are selected;
+    # an empty selection would always read 0% and falsely reassure.
+    if selected:
+        try:
+            exportdb_dir = Path(config.state.exportdb_dir).expanduser()
+            exportdb_dir.mkdir(parents=True, exist_ok=True)
+            opts = _export_options(
+                config,
+                destination,
+                exportdb_dir,
+                "selected",
+                None,
+                config.export.use_photokit,
+            )
+            risk = probe_optimize_storage_risk(opts)
+            label = "warn" if risk >= 0.25 else "pass"
+            print(f"[{label}] Optimize Storage dry-run risk: {risk:.0%} missing/error rows")
+        except (OsxphotosError, ReportError, ValueError) as exc:
+            ok = False
+            print(f"[fail] Optimize Storage dry run: {exc}")
+    else:
+        print(
+            "[info] Optimize Storage risk: select photos in Photos and rerun doctor to gauge "
+            "how many originals are cloud-only."
         )
-        risk = probe_optimize_storage_risk(opts)
-        label = "warn" if risk >= 0.25 else "pass"
-        print(f"[{label}] Optimize Storage dry-run risk: {risk:.0%} missing/error rows")
-    except (OsxphotosError, ReportError, ValueError) as exc:
-        ok = False
-        print(f"[fail] Optimize Storage dry run: {exc}")
 
     print("[info] Windows: use authenticated SMB, and install HEIF/HEVC codecs or enable copies.")
     print("[info] macOS 26: Shared Albums may not be readable by osxphotos yet.")
@@ -362,6 +393,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
     else:
         smb_url = input("SMB URL (for example smb://192.168.1.50/FamilyPhotos): ").strip()
         mount_point = input("Mount point (for example /Volumes/FamilyPhotos): ").strip()
+
+    if smb_url:
+        try:
+            validate_smb_url(smb_url)
+        except ConfigError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_USAGE
 
     text = _render_config(
         smb_url=smb_url,
@@ -559,6 +597,25 @@ def _ensure_destination_ready(config: Config, destination: Path) -> str | None:
         return str(exc)
 
 
+def _acquire_destination_lock(exportdb_dir: Path, destination: Path):
+    """Take a non-blocking per-destination lock, or return ``None`` if busy.
+
+    Keyed on the same destination hash as the export DB so two concurrent sends
+    to the *same* share are blocked while sends to different shares run freely.
+    The caller holds the returned handle for the run; the flock is advisory and
+    released automatically when the handle is closed or the process exits.
+    """
+    exportdb_dir.mkdir(parents=True, exist_ok=True)
+    stem = resolved_exportdb_path(destination, exportdb_dir).stem
+    handle = (exportdb_dir / f"{stem}.lock").open("w")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
 def _export_options(
     config: Config,
     destination: Path,
@@ -670,6 +727,13 @@ def _print_summary(
         f"{report.missing} missing, {report.error} error."
     )
     print(f"Selected assets: {selected}")
+    if report.exiftool_error or report.exiftool_warning:
+        print(
+            f"Note: metadata embedding reported {report.exiftool_error} error(s) and "
+            f"{report.exiftool_warning} warning(s). The photo/video bytes copied fine, but "
+            "some EXIF/GPS/date tags on those files may be incomplete — check the report.",
+            file=sys.stderr,
+        )
     if dry_run:
         print("No files were written.")
 
@@ -714,6 +778,8 @@ def _write_run_log(
     error: int,
     converted: int = 0,
     mp4: int = 0,
+    exiftool_error: int = 0,
+    exiftool_warning: int = 0,
 ) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     row = {
@@ -723,6 +789,8 @@ def _write_run_log(
         "exported": exported,
         "missing": missing,
         "error": error,
+        "exiftool_error": exiftool_error,
+        "exiftool_warning": exiftool_warning,
         "converted": converted,
         "mp4": mp4,
         "duration_seconds": round(time.monotonic() - started, 3),
@@ -787,11 +855,23 @@ def _render_shortcut_script(executable: str, config_path: Path | None) -> str:
     args = [executable, "send"]
     if config_path is not None:
         args += ["--config", str(config_path)]
+    # The final echoed line is what a Shortcut surfaces as a notification, so it
+    # maps the send exit code to a human-readable status. No password ever here.
     return (
         "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
+        "set -uo pipefail\n"
         'export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"\n'
-        f"exec {shlex.join(args)}\n"
+        f"{shlex.join(args)}\n"
+        "code=$?\n"
+        'case "$code" in\n'
+        '  0) echo "✅ Photos sent." ;;\n'
+        "  3) echo \"⚠️ Some photos were skipped — turn on iCloud 'Download Originals' "
+        'and retry." ;;\n'
+        '  4) echo "👉 Nothing selected — pick photos in Photos first." ;;\n'
+        '  5) echo "⚠️ Photos sent, but a compatibility (JPEG/MP4) copy failed." ;;\n'
+        '  *) echo "❌ Send failed (code $code) — run: photos-tool doctor" ;;\n'
+        "esac\n"
+        'exit "$code"\n'
     )
 
 

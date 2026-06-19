@@ -19,10 +19,13 @@ photos-tool install-shortcut
 ```
 
 Then create a macOS Shortcut with one "Run Shell Script" action that calls the
-script path printed by the command. The script sets a practical PATH and then runs
-`photos-tool send`; it contains no passwords. Assign a keyboard shortcut. The
-workflow is: select items in Photos, press the hotkey, and let the Shortcut
-surface the exit code.
+script path printed by the command. The script sets a practical PATH, runs
+`photos-tool send`, and prints a one-line human status (for example
+"✅ Photos sent." or "⚠️ Some photos were skipped…") that you can feed straight
+into a Shortcut notification; it contains no passwords. Assign a keyboard
+shortcut. The workflow is: select items in Photos, press the hotkey, and read the
+notification. If you press the hotkey twice, the second run detects the first is
+still going and exits without starting an overlapping export.
 
 Expected exit codes:
 
@@ -33,7 +36,7 @@ Expected exit codes:
 | 2 | bad arguments or config |
 | 3 | export ran but some assets were skipped or errored |
 | 4 | nothing selected |
-| 5 | MP4 conversion failed after export succeeded |
+| 5 | a compatibility copy (JPEG or MP4) failed after the originals exported |
 
 ## Test album
 

@@ -122,6 +122,40 @@ def test_sanitize_report_command_refuses_overwrite_without_force(tmp_path):
     assert target.read_text(encoding="utf-8") == "keep"
 
 
+def test_init_rejects_invalid_smb_url(tmp_path, capsys):
+    path = tmp_path / "config.toml"
+
+    rc = cli.main(
+        [
+            "init",
+            "--non-interactive",
+            "--config",
+            str(path),
+            "--smb-url",
+            "smb://photos:secret@nas/Share",
+            "--mount-point",
+            "/Volumes/Share",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "credentials" in captured.err
+    assert not path.exists()
+
+
+def test_install_shortcut_maps_exit_codes_to_human_messages(tmp_path):
+    script = tmp_path / "send-selected.sh"
+
+    assert cli.main(["install-shortcut", "--script", str(script)]) == 0
+    text = script.read_text(encoding="utf-8")
+
+    assert 'case "$code" in' in text
+    assert "Some photos were skipped" in text
+    assert 'exit "$code"' in text
+    assert "password" not in text.lower()
+
+
 def test_no_subcommand_errors():
     with pytest.raises(SystemExit):
         cli.main([])

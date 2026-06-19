@@ -512,3 +512,58 @@ def test_doctor_runs_fake_preflight_and_dry_run(tmp_path: Path, fake_tools, caps
     assert "[pass] destination writable" in captured.out
     assert "Optimize Storage dry-run risk: 0%" in captured.out
     assert (tmp_path / "state" / "exportdb").is_dir()
+
+
+def test_doctor_does_not_claim_zero_risk_without_a_selection(tmp_path: Path, fake_tools, capsys):
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)
+    fake_tools(scenario(mount, selected=0))
+
+    rc = cli.main(["doctor", "--config", str(config)])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "[info] Optimize Storage risk" in captured.out
+    assert "Optimize Storage dry-run risk: 0%" not in captured.out
+
+
+def test_send_surfaces_exiftool_errors_without_failing(tmp_path: Path, fake_tools, capsys):
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)
+    fake_tools(
+        scenario(
+            mount,
+            selected=1,
+            report=[{**row("asset-1"), "exiftool_error": True}],
+        )
+    )
+
+    rc = cli.main(["send", "--config", str(config)])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "metadata embedding reported" in captured.err
+    log_line = (tmp_path / "state" / "logs" / "runs.jsonl").read_text(encoding="utf-8")
+    assert '"exiftool_error": 1' in log_line
+
+
+def test_send_rejects_concurrent_run_for_same_destination(tmp_path: Path, fake_tools, capsys):
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)
+    tools = fake_tools(scenario(mount, selected=1, report=[row("asset-1")]))
+
+    exportdb_dir = tmp_path / "state" / "exportdb"
+    held = cli._acquire_destination_lock(exportdb_dir, mount)
+    assert held is not None
+    try:
+        rc = cli.main(["send", "--config", str(config)])
+    finally:
+        held.close()
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "already running" in captured.err
+    assert osxphotos_exports(tools.log()) == []
