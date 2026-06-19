@@ -15,3 +15,5 @@ dist/
 .osxphotos_export.db
 *.osxphotos_export.db
 report*.csv
+# ...except the synthetic, non-personal test fixture
+!tests/fixtures/report.csv

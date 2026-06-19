@@ -1,0 +1,35 @@
+[
+  {
+    "uuid": "asset-1",
+    "filename": "/Volumes/FamilyPhotos/2024/01/IMG_0001.HEIC",
+    "exported": true,
+    "new": true,
+    "updated": false,
+    "skipped": false,
+    "converted_to_jpeg": false,
+    "missing": false,
+    "error": false
+  },
+  {
+    "uuid": "asset-2",
+    "filename": "/Volumes/FamilyPhotos/2024/01/IMG_0002.MOV",
+    "exported": true,
+    "new": true,
+    "updated": false,
+    "skipped": false,
+    "converted_to_jpeg": false,
+    "missing": false,
+    "error": false
+  },
+  {
+    "uuid": "asset-3",
+    "filename": "/Volumes/FamilyPhotos/2024/01/IMG_0003.HEIC",
+    "exported": false,
+    "new": false,
+    "updated": false,
+    "skipped": true,
+    "converted_to_jpeg": false,
+    "missing": false,
+    "error": false
+  }
+]
