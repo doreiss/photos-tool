@@ -145,6 +145,31 @@ def test_init_rejects_invalid_smb_url(tmp_path, capsys):
     assert not path.exists()
 
 
+def test_init_derives_mount_point_from_smb_url(tmp_path, monkeypatch):
+    path = tmp_path / "config.toml"
+    answers = iter(["smb://nas/FamilyPhotos", "", ""])  # url, blank mount (accept default), subpath
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    rc = cli.main(["init", "--config", str(path)])
+    text = path.read_text(encoding="utf-8")
+
+    assert rc == 0
+    assert 'mount_point = "/Volumes/FamilyPhotos"' in text
+
+
+def test_init_requires_a_mount_point(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "config.toml"
+    answers = iter(["", "", ""])  # no url, no mount point -> nothing to derive
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    rc = cli.main(["init", "--config", str(path)])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "mount point is required" in captured.err
+    assert not path.exists()
+
+
 def test_init_defaults_subpath_to_this_mac(tmp_path):
     path = tmp_path / "config.toml"
 

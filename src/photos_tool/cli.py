@@ -15,6 +15,7 @@ import time
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 from . import __version__
 from .config import (
@@ -409,12 +410,26 @@ def _cmd_init(args: argparse.Namespace) -> int:
         subpath = args.subpath if args.subpath is not None else _default_subpath()
     else:
         smb_url = input("SMB URL (for example smb://192.168.1.50/FamilyPhotos): ").strip()
-        mount_point = input("Mount point (for example /Volumes/FamilyPhotos): ").strip()
+        default_mount = _default_mount_point(smb_url)
+        mount_prompt = (
+            f"Mount point [{default_mount}]: "
+            if default_mount
+            else "Mount point (for example /Volumes/FamilyPhotos): "
+        )
+        mount_point = input(mount_prompt).strip() or default_mount
         default_subpath = _default_subpath()
         entered = input(
             f"Subfolder for THIS Mac (keeps each Mac's photos separate) [{default_subpath}]: "
         ).strip()
         subpath = entered or default_subpath
+
+    if not mount_point:
+        print(
+            "error: a mount point is required (for example /Volumes/FamilyPhotos) — it is where "
+            "the share appears once mounted.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
 
     if smb_url:
         try:
@@ -963,6 +978,14 @@ def _default_subpath() -> str:
     name = socket.gethostname().split(".")[0]
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")
     return slug or "mac"
+
+
+def _default_mount_point(smb_url: str) -> str:
+    """Guess where macOS mounts ``smb://host/Share`` — ``/Volumes/Share``."""
+    if not smb_url:
+        return ""
+    share = urlparse(smb_url).path.strip("/").split("/")[0]
+    return f"/Volumes/{share}" if share else ""
 
 
 def _render_config(smb_url: str, mount_point: str, subpath: str, *, jpeg: bool, mp4: bool) -> str:
