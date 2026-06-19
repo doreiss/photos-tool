@@ -57,7 +57,11 @@ def _osxphotos(scenario: dict) -> int:
             report = _pick_report(scenario, destination, dry_run)
             report_path.write_text(json.dumps(report), encoding="utf-8")
         if not dry_run:
+            only_photos = "--only-photos" in args
             for rel in _pick_files(scenario, destination):
+                # Mirror --only-photos: the compat pass never writes movies.
+                if only_photos and Path(rel).suffix.lower() in {".mov", ".m4v"}:
+                    continue
                 path = destination / rel
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("fake", encoding="utf-8")

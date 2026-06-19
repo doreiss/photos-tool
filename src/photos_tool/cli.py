@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import re
 import shlex
 import shutil
+import socket
 import sys
 import tempfile
 import time
@@ -33,6 +35,8 @@ from .osxphotos_runner import (
     run_export,
 )
 from .plan import ExportOptions, build_export_command
+from .reconcile import Reconciliation
+from .remove import RemoveError, gate_cleanup, remove_originals, select_removable
 from .report import (
     ReportError,
     ReportSummary,
@@ -125,6 +129,14 @@ def _cmd_send(args: argparse.Namespace) -> int:
     scope = "album" if args.album else "selected"
     album = args.album
 
+    if config.destination.smb_url and not config.destination.subpath:
+        print(
+            "Warning: no per-Mac subpath is set (destination.subpath is empty). If other Macs "
+            "back up to this share, photos that share a name like IMG_0001 can overwrite each "
+            "other. Run 'photos-tool init' to set a per-Mac subfolder.",
+            file=sys.stderr,
+        )
+
     statuses = probe_all()
     missing = missing_required(statuses)
     if mp4:
@@ -156,7 +168,13 @@ def _cmd_send(args: argparse.Namespace) -> int:
         return EXIT_PREFLIGHT
 
     if selected == 0:
-        print("Nothing selected. Select photos in Photos first, then run photos-tool send.")
+        if scope == "album":
+            print(
+                f"No photos matched album {album!r}. Album names are case-sensitive — "
+                "check the spelling, or that the album actually contains photos."
+            )
+        else:
+            print("Nothing selected. Select photos in Photos first, then run photos-tool send.")
         return EXIT_NOTHING_SELECTED
 
     log_dir = Path(config.state.log_dir).expanduser()
@@ -167,9 +185,10 @@ def _cmd_send(args: argparse.Namespace) -> int:
     if args.dry_run:
         return _send_dry_run(opts, selected)
 
-    # Guard against a double-pressed hotkey launching two overlapping exports to
-    # the same share. The handle is held for the rest of this run; the OS releases
-    # the flock when the process exits or the handle is closed.
+    # Guard against a double-pressed hotkey launching two overlapping exports on THIS
+    # Mac (the lock file lives in the local state dir, so it serializes same-Mac runs
+    # only; per-Mac subpaths keep different Macs out of each other's trees). The handle
+    # is held for the rest of this run; the OS releases the flock on exit/close.
     lock = _acquire_destination_lock(exportdb_dir, destination)
     if lock is None:
         print(
@@ -249,35 +268,28 @@ def _cmd_send(args: argparse.Namespace) -> int:
                     error=report.error,
                 )
                 return EXIT_CONVERSION
-            jpeg_reconciliation = summarize(jpeg_report, selected)
-            if not jpeg_reconciliation.ok:
+            # The compat pass exports photos only (--only-photos), so its count is
+            # legitimately lower than the selection; do not treat that as loss. The
+            # originals pass above is the safety-critical reconciliation. Still surface
+            # any real missing/errored compat rows as a non-fatal warning.
+            if jpeg_report.issue_count:
                 print(
-                    f"JPEG compatibility export error: {jpeg_reconciliation.message}",
+                    f"Warning: {jpeg_report.issue_count} compatibility-copy row(s) were "
+                    "missing or errored; your originals export is unaffected.",
                     file=sys.stderr,
                 )
-                _write_run_log(
-                    log_dir,
-                    started=started,
-                    exit_code=EXIT_CONVERSION,
-                    scope=scope,
-                    selected=selected,
-                    exported=reconciliation.exported,
-                    missing=report.missing,
-                    error=report.error,
-                    converted=jpeg_report.converted,
-                )
-                return EXIT_CONVERSION
 
         convert_summary = ConvertSummary()
         if mp4:
             try:
                 convert_summary = convert_videos(
                     destination,
+                    destination / "compat",
                     crf=config.copies.mp4_crf,
                     cache_path=log_dir / "video-codec-cache.json",
                 )
                 print(
-                    "MP4 copies: "
+                    "MP4 copies into compat/: "
                     f"{convert_summary.transcoded} transcoded, "
                     f"{convert_summary.skipped_live} Live Photo motion skipped, "
                     f"{convert_summary.skipped_existing} already current."
@@ -313,6 +325,10 @@ def _cmd_send(args: argparse.Namespace) -> int:
             exiftool_error=report.exiftool_error,
             exiftool_warning=report.exiftool_warning,
         )
+
+        if _override(args.remove_originals, config.remove.enabled) and exit_code == EXIT_OK:
+            _maybe_remove_originals(report, reconciliation, config, args, log_dir)
+
         return exit_code
 
 
@@ -390,9 +406,15 @@ def _cmd_init(args: argparse.Namespace) -> int:
             return EXIT_USAGE
         smb_url = args.smb_url
         mount_point = args.mount_point
+        subpath = args.subpath if args.subpath is not None else _default_subpath()
     else:
         smb_url = input("SMB URL (for example smb://192.168.1.50/FamilyPhotos): ").strip()
         mount_point = input("Mount point (for example /Volumes/FamilyPhotos): ").strip()
+        default_subpath = _default_subpath()
+        entered = input(
+            f"Subfolder for THIS Mac (keeps each Mac's photos separate) [{default_subpath}]: "
+        ).strip()
+        subpath = entered or default_subpath
 
     if smb_url:
         try:
@@ -404,6 +426,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
     text = _render_config(
         smb_url=smb_url,
         mount_point=mount_point,
+        subpath=subpath,
         jpeg=args.jpeg,
         mp4=args.mp4,
     )
@@ -509,6 +532,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--non-interactive", action="store_true")
     p_init.add_argument("--smb-url")
     p_init.add_argument("--mount-point")
+    p_init.add_argument(
+        "--subpath",
+        default=None,
+        help="per-Mac subfolder on the share (default: this Mac's name; pass '' to disable)",
+    )
     p_init.add_argument("--jpeg", action="store_true", help="default to JPEG compatibility copies")
     p_init.add_argument("--mp4", action="store_true", help="default to MP4 compatibility copies")
     p_init.add_argument("--force", action="store_true", help="overwrite an existing config")
@@ -553,6 +581,22 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--jpeg", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--mp4", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--use-photokit", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument(
+        "--remove-originals",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="after a clean export, move the exported originals to Recently Deleted",
+    )
+    parser.add_argument(
+        "--remove-dry-run",
+        action="store_true",
+        help="with --remove-originals, only report what would be removed",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="skip the interactive confirmation before removing originals",
+    )
 
 
 def _print_tool_statuses(statuses: Sequence[ToolStatus]) -> None:
@@ -600,10 +644,11 @@ def _ensure_destination_ready(config: Config, destination: Path) -> str | None:
 def _acquire_destination_lock(exportdb_dir: Path, destination: Path):
     """Take a non-blocking per-destination lock, or return ``None`` if busy.
 
-    Keyed on the same destination hash as the export DB so two concurrent sends
-    to the *same* share are blocked while sends to different shares run freely.
-    The caller holds the returned handle for the run; the flock is advisory and
-    released automatically when the handle is closed or the process exits.
+    The lock file lives in the local state dir and is keyed on the destination
+    hash, so it serializes two sends to the same destination *on this Mac* (the
+    double-pressed-hotkey case). It does not coordinate across Macs — per-Mac
+    subpaths keep different Macs in different trees. The caller holds the handle
+    for the run; the flock is released automatically on close or process exit.
     """
     exportdb_dir.mkdir(parents=True, exist_ok=True)
     stem = resolved_exportdb_path(destination, exportdb_dir).stem
@@ -616,6 +661,89 @@ def _acquire_destination_lock(exportdb_dir: Path, destination: Path):
     return handle
 
 
+def _maybe_remove_originals(
+    report: ReportSummary,
+    reconciliation: Reconciliation,
+    config: Config,
+    args: argparse.Namespace,
+    log_dir: Path,
+) -> None:
+    allowed, reason = gate_cleanup(reconciliation, report)
+    if not allowed:
+        print(f"Not removing originals: {reason}.", file=sys.stderr)
+        return
+    # A clean reconciliation is not enough — only remove originals whose copy is
+    # verifiably on the share right now (a re-run reports already-known assets as
+    # "skipped" even if their copies were since deleted).
+    uuids, kept = select_removable(report, lambda path: Path(path).exists())
+    if kept:
+        print(
+            f"Keeping {len(kept)} original(s) in Photos — their copy is missing from the share "
+            "or shares a filename with another photo.",
+            file=sys.stderr,
+        )
+    if not uuids:
+        print(
+            "No originals are verified safe to remove (no copies confirmed on the share).",
+            file=sys.stderr,
+        )
+        return
+    if args.remove_dry_run:
+        # Verify the assets actually resolve in Photos (mapping + authorization) but
+        # delete nothing — the safe preview before a real removal.
+        try:
+            result = remove_originals(uuids, dry_run=True, max_delete=config.remove.max_delete)
+        except RemoveError as exc:
+            print(f"Remove dry run could not verify originals: {exc}", file=sys.stderr)
+            return
+        print(
+            f"Remove dry run: {result.requested} original(s) are backed up on the share and would "
+            "move to Recently Deleted (recoverable ~30 days). Nothing was deleted."
+        )
+        return
+    print(f"\n{len(uuids)} original(s) verified backed up on the share.")
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print(
+                "Refusing to remove originals without confirmation; pass --yes or run "
+                "interactively.",
+                file=sys.stderr,
+            )
+            return
+        answer = (
+            input(f"Move {len(uuids)} originals to Recently Deleted (recoverable ~30 days)? [y/N] ")
+            .strip()
+            .lower()
+        )
+        if answer not in {"y", "yes"}:
+            print("Left originals in Photos.")
+            return
+    try:
+        result = remove_originals(uuids, dry_run=False, max_delete=config.remove.max_delete)
+    except RemoveError as exc:
+        print(f"Could not remove originals: {exc}", file=sys.stderr)
+        return
+    print(f"Moved {result.deleted} original(s) to Recently Deleted (recoverable ~30 days).")
+    _log_removed(log_dir, uuids)
+
+
+def _log_removed(log_dir: Path, uuids: Sequence[str]) -> None:
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "count": len(uuids),
+        "removed_uuids": list(uuids),
+    }
+    try:
+        with (log_dir / "removed.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError as exc:
+        # The delete already happened and is recoverable; never crash over the log.
+        print(
+            f"Warning: removed originals but could not write the audit log: {exc}",
+            file=sys.stderr,
+        )
+
+
 def _export_options(
     config: Config,
     destination: Path,
@@ -624,8 +752,10 @@ def _export_options(
     album: str | None,
     use_photokit: bool,
     *,
-    convert_to_jpeg: bool = False,
+    compat: bool = False,
 ) -> ExportOptions:
+    # The compat pass writes a Windows-friendly mirror: stills converted to JPEG,
+    # no Live Photo motion movies and no standalone movies (those become MP4s).
     return ExportOptions(
         destination=str(destination),
         scope=scope,
@@ -636,8 +766,10 @@ def _export_options(
         use_photokit=use_photokit,
         touch_file=True,
         retry=config.export.retry,
-        convert_to_jpeg=convert_to_jpeg,
+        convert_to_jpeg=compat,
         jpeg_quality=config.copies.jpeg_quality,
+        only_photos=compat,
+        skip_live=compat,
         directory_template=config.export.directory_template,
         filename_template=config.export.filename_template,
     )
@@ -694,7 +826,7 @@ def _run_jpeg_pass(
         scope,
         album,
         use_photokit,
-        convert_to_jpeg=True,
+        compat=True,
     )
     report_path = report_dir / "jpeg.json"
     result = run_export(opts, report_path)
@@ -826,11 +958,18 @@ def _print_captured(result: ExportResult) -> None:
         print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
 
 
-def _render_config(smb_url: str, mount_point: str, *, jpeg: bool, mp4: bool) -> str:
+def _default_subpath() -> str:
+    """A filesystem-safe per-Mac subfolder so family Macs do not collide on names."""
+    name = socket.gethostname().split(".")[0]
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")
+    return slug or "mac"
+
+
+def _render_config(smb_url: str, mount_point: str, subpath: str, *, jpeg: bool, mp4: bool) -> str:
     return f"""[destination]
 smb_url = {json.dumps(smb_url)}
 mount_point = {json.dumps(mount_point)}
-subpath = ""
+subpath = {json.dumps(subpath)}
 
 [export]
 directory_template = "{{created.year}}/{{created.mm}}"

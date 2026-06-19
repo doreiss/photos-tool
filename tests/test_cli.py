@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 import pytest
 
@@ -142,6 +143,52 @@ def test_init_rejects_invalid_smb_url(tmp_path, capsys):
     assert rc == 2
     assert "credentials" in captured.err
     assert not path.exists()
+
+
+def test_init_defaults_subpath_to_this_mac(tmp_path):
+    path = tmp_path / "config.toml"
+
+    rc = cli.main(
+        [
+            "init",
+            "--non-interactive",
+            "--config",
+            str(path),
+            "--smb-url",
+            "smb://nas/Share",
+            "--mount-point",
+            "/Volumes/Share",
+        ]
+    )
+    text = path.read_text(encoding="utf-8")
+    match = re.search(r'subpath = "(.*)"', text)
+
+    assert rc == 0
+    # Defaults to a non-empty per-Mac subfolder so family Macs do not collide.
+    assert match is not None
+    assert match.group(1)
+
+
+def test_init_subpath_can_be_disabled(tmp_path):
+    path = tmp_path / "config.toml"
+
+    rc = cli.main(
+        [
+            "init",
+            "--non-interactive",
+            "--config",
+            str(path),
+            "--smb-url",
+            "smb://nas/Share",
+            "--mount-point",
+            "/Volumes/Share",
+            "--subpath",
+            "",
+        ]
+    )
+
+    assert rc == 0
+    assert 'subpath = ""' in path.read_text(encoding="utf-8")
 
 
 def test_install_shortcut_maps_exit_codes_to_human_messages(tmp_path):

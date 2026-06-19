@@ -52,12 +52,15 @@ Create a small album with about 10 items:
 
 1. Run `photos-tool doctor`. Expected: required tools pass, the share is writable, Photos is readable, and any Optimize Storage risk is explicit.
 2. Select the album items in Photos and run `photos-tool send --dry-run`. Expected: the selected count looks right, no files are written, and Optimize Storage warnings appear only for expected cloud-only items.
-3. Run `photos-tool send`. Expected on Windows: files land under `<share>\<year>\<month>\...`; the Live Photo appears as a still plus `.MOV`; the standalone video is present.
+3. Run `photos-tool send`. Expected on Windows: files land under `<share>\<this-mac>\<year>\<month>\...` (note the per-Mac subfolder); the Live Photo appears as a still plus `.MOV`; the standalone video is present.
 4. Check metadata on the Mac copy or Windows copy with `exiftool -G1 -time:all -gps:all <file>`. Expected: photo dates/GPS and video QuickTime creation dates are present.
-5. Run `photos-tool send --jpeg --mp4`. Expected: JPEG files appear under the parallel `compat` tree, the standalone HEVC video gets an `.mp4`, and the Live Photo motion clip is not transcoded.
-6. Run `photos-tool send` again with the same selection. Expected: no duplicate archive files; the report shows skipped/current rows rather than new copies.
+5. Run `photos-tool send --jpeg --mp4`. Expected: the `compat/` tree under your Mac's subfolder holds a `.jpeg` for every still and a `.mp4` for every standalone HEVC video, and **nothing else** — no `.heic`, no `.mov`. The main tree still holds only the originals. On Windows, every file under `compat/` opens without extra codecs.
+6. Run `photos-tool send` again with the same selection. Expected: no duplicate archive files; the report shows skipped/current rows; MP4 copies report "already current".
 7. Select a known cloud-only item and run `photos-tool send`. Expected: exit code 3 and a clear message about skipped items and Download Originals.
-8. During a larger export, confirm the Mac stays responsive and `photos-tool` leaves no resident process after it exits.
+8. **Menu-bar app:** run `photos-tool-menubar`, select photos in Photos, click 📷 → Send Selected Photos. Expected: a notification ("Photos sent" / "Some photos were skipped" / "Nothing selected") matching the CLI exit code.
+9. **Mac-side cleanup (opt-in, recoverable):** with items still selected, run `photos-tool send --remove-originals --remove-dry-run`. Expected: it reports "N original(s) resolve in Photos … Nothing was deleted" (grant Photos access first if it says it is not authorized). Then, on a *throwaway* test item, `photos-tool send --remove-originals` and confirm: the item moves to Photos → Recently Deleted (recoverable ~30 days), and `~/.local/state/photos-tool/logs/removed.jsonl` records the UUID.
+10. **Multi-Mac (if you have a second Mac):** install and `init` on a second Mac, confirm its photos land under a *different* `<share>\<other-mac>\...` subfolder, and that an `IMG_0001.heic` from each Mac coexists without overwriting.
+11. During a larger export, confirm the Mac stays responsive and `photos-tool` leaves no resident process after it exits.
 
 ## Capturing the authoritative report fixture
 

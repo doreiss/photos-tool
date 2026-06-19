@@ -26,6 +26,9 @@ class ExportOptions:
     retry: int = 3
     convert_to_jpeg: bool = False
     jpeg_quality: float = 0.9
+    jpeg_ext: str = "jpeg"
+    only_photos: bool = False
+    skip_live: bool = False
     directory_template: str = "{created.year}/{created.mm}"
     filename_template: str = "{original_name}"
 
@@ -58,5 +61,11 @@ def build_export_command(opts: ExportOptions) -> list[str]:
         cmd += ["--retry", str(opts.retry)]
     if opts.convert_to_jpeg:
         cmd += ["--convert-to-jpeg", "--jpeg-quality", f"{opts.jpeg_quality:g}"]
+        if opts.jpeg_ext:
+            cmd += ["--jpeg-ext", opts.jpeg_ext]
+    if opts.only_photos:
+        cmd.append("--only-photos")
+    if opts.skip_live:
+        cmd.append("--skip-live")
     cmd += ["--directory", opts.directory_template, "--filename", opts.filename_template]
     return cmd

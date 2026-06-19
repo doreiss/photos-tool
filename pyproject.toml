@@ -18,9 +18,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["ruff>=0.6.0", "pyright>=1.1.380", "pytest>=8.0"]
+gui = ['rumps>=0.4.0; sys_platform == "darwin"']
 
 [project.scripts]
 photos-tool = "photos_tool.cli:main"
+photos-tool-menubar = "photos_tool.menubar:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/photos_tool"]
@@ -35,6 +37,9 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.pyright]
 include = ["src", "tests"]
+# The rumps menu-bar shell needs a macOS-only, untyped GUI dependency; its logic
+# lives in the type-checked, unit-tested gui_actions.py instead.
+exclude = ["**/node_modules", "**/__pycache__", "**/.*", "src/photos_tool/menubar.py"]
 extraPaths = ["src"]
 pythonVersion = "3.10"
 typeCheckingMode = "standard"

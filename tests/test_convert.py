@@ -19,15 +19,46 @@ def test_live_photo_motion_detection_is_sibling_still_based(tmp_path: Path):
     assert not convert.is_live_photo_motion(standalone)
 
 
+def test_convert_videos_writes_mp4_into_compat_tree(tmp_path: Path, monkeypatch):
+    root = tmp_path / "archive"
+    compat = tmp_path / "archive" / "compat"
+    src = root / "2024" / "09" / "VID_0003.MOV"
+    src.parent.mkdir(parents=True)
+    src.write_text("video", encoding="utf-8")
+
+    outputs: list[Path] = []
+    monkeypatch.setattr(convert, "probe_video_codec", lambda _p: "hevc")
+
+    def fake_transcode(source: Path, output: Path, crf: int = 20) -> None:
+        outputs.append(output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("mp4", encoding="utf-8")
+
+    monkeypatch.setattr(convert, "transcode_to_mp4", fake_transcode)
+
+    summary = convert.convert_videos(root, compat, crf=22)
+
+    assert summary.transcoded == 1
+    # The mp4 mirrors the source's relative path under compat/, never alongside it.
+    assert outputs == [compat / "2024" / "09" / "VID_0003.mp4"]
+    assert not (src.parent / "VID_0003.mp4").exists()
+
+
 def test_convert_videos_skips_live_motion_and_current_outputs(tmp_path: Path, monkeypatch):
-    live_mov = tmp_path / "IMG_0001.MOV"
-    live_still = tmp_path / "IMG_0001.HEIC"
-    current_mov = tmp_path / "VID_0002.MOV"
-    current_mp4 = tmp_path / "VID_0002.mp4"
-    standalone = tmp_path / "VID_0003.MOV"
-    non_hevc = tmp_path / "VID_0004.MOV"
-    for path in (live_mov, live_still, current_mov, current_mp4, standalone, non_hevc):
+    root = tmp_path / "archive"
+    compat = root / "compat"
+    root.mkdir()
+    live_mov = root / "IMG_0001.MOV"
+    live_still = root / "IMG_0001.HEIC"
+    current_mov = root / "VID_0002.MOV"
+    standalone = root / "VID_0003.MOV"
+    non_hevc = root / "VID_0004.MOV"
+    for path in (live_mov, live_still, current_mov, standalone, non_hevc):
         path.write_text(path.name, encoding="utf-8")
+    # An already-current mp4 sits in compat/ and is newer than its source.
+    current_mp4 = compat / "VID_0002.mp4"
+    current_mp4.parent.mkdir(parents=True)
+    current_mp4.write_text("mp4", encoding="utf-8")
     os.utime(current_mp4, (current_mov.stat().st_atime + 10, current_mov.stat().st_mtime + 10))
 
     transcoded: list[Path] = []
@@ -37,12 +68,13 @@ def test_convert_videos_skips_live_motion_and_current_outputs(tmp_path: Path, mo
 
     def fake_transcode(source: Path, output: Path, crf: int = 20) -> None:
         transcoded.append(source)
+        output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(f"{source}:{crf}", encoding="utf-8")
 
     monkeypatch.setattr(convert, "probe_video_codec", fake_codec)
     monkeypatch.setattr(convert, "transcode_to_mp4", fake_transcode)
 
-    summary = convert.convert_videos(tmp_path, crf=22)
+    summary = convert.convert_videos(root, compat, crf=22)
 
     assert summary.scanned == 4
     assert summary.skipped_live == 1
@@ -65,18 +97,21 @@ def test_convert_videos_excludes_compat_tree(tmp_path: Path, monkeypatch):
 
     def fake_transcode(source: Path, output: Path, crf: int = 20) -> None:
         transcoded.append(source)
+        output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("mp4", encoding="utf-8")
 
     monkeypatch.setattr(convert, "transcode_to_mp4", fake_transcode)
 
-    summary = convert.convert_videos(tmp_path)
+    summary = convert.convert_videos(tmp_path, tmp_path / "compat")
 
     assert summary.scanned == 1
     assert transcoded == [archive_video]
 
 
 def test_convert_videos_caches_non_hevc_probe(tmp_path: Path, monkeypatch):
-    video = tmp_path / "VID_0001.MOV"
+    root = tmp_path / "archive"
+    root.mkdir()
+    video = root / "VID_0001.MOV"
     cache = tmp_path / "cache.json"
     video.write_text("video", encoding="utf-8")
     probes = 0
@@ -88,8 +123,8 @@ def test_convert_videos_caches_non_hevc_probe(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(convert, "probe_video_codec", fake_codec)
 
-    first = convert.convert_videos(tmp_path, cache_path=cache)
-    second = convert.convert_videos(tmp_path, cache_path=cache)
+    first = convert.convert_videos(root, root / "compat", cache_path=cache)
+    second = convert.convert_videos(root, root / "compat", cache_path=cache)
 
     assert first.skipped_non_hevc == 1
     assert second.skipped_non_hevc == 1

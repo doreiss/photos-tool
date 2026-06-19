@@ -46,6 +46,33 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest
 
+  # Prove the built wheel installs cleanly into a fresh environment and the
+  # console scripts work — the real `uv tool install` / `pipx install` path that
+  # each family Mac uses, not just the editable dev install.
+  install:
+    name: clean install (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build and install the wheel into a clean venv
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+          python -m venv "${RUNNER_TEMP}/clean"
+          "${RUNNER_TEMP}/clean/bin/pip" install dist/*.whl
+      - name: Console scripts and imports work
+        run: |
+          "${RUNNER_TEMP}/clean/bin/photos-tool" --version
+          "${RUNNER_TEMP}/clean/bin/photos-tool" --help >/dev/null
+          "${RUNNER_TEMP}/clean/bin/python" -c "import photos_tool.menubar, photos_tool.gui_actions, photos_tool.remove"
+
   # The point of this job: prove the toolchain installs and our code runs on a
   # clean, generic Apple Silicon Mac. GitHub's macos-14/15 runners are arm64.
   # (CI cannot exercise the real Photos export — no Photos library, no GUI

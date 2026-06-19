@@ -2,4 +2,11 @@
 
 from __future__ import annotations
 
-__version__ = "0.0.1"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    # Single source of truth: the version pip/uv installed (from pyproject), so
+    # `photos-tool --version` can never drift from the published package.
+    __version__ = version("photos-tool")
+except PackageNotFoundError:  # pragma: no cover - only when running from a bare checkout
+    __version__ = "0.0.0+unknown"
