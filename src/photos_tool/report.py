@@ -95,6 +95,9 @@ class ReportSummary:
     exiftool_error: int = 0
     exiftool_warning: int = 0
     exported_uuids: frozenset[str] | None = None
+    # uuid -> the destination path(s) osxphotos reported for it. Load-bearing for the
+    # cleanup feature, which must confirm a copy is actually on the share before deleting.
+    exported_paths: dict[str, tuple[str, ...]] | None = None
     columns: frozenset[str] = frozenset()
 
     @property
@@ -139,6 +142,7 @@ def summarize_rows(rows: Iterable[dict[str, Any]]) -> ReportSummary:
     row_list = list(rows)
     columns: set[str] = set()
     exported_uuids: set[str] = set()
+    exported_paths: dict[str, list[str]] = {}
     uuid_present = False
     exported = new = updated = skipped = converted = missing = error = 0
     exiftool_error = exiftool_warning = 0
@@ -161,7 +165,11 @@ def summarize_rows(rows: Iterable[dict[str, Any]]) -> ReportSummary:
         if uuid not in (None, ""):
             uuid_present = True
             if not row_missing and not row_error:
-                exported_uuids.add(str(uuid))
+                key = str(uuid)
+                exported_uuids.add(key)
+                filename = row.get("filename")
+                if filename not in (None, ""):
+                    exported_paths.setdefault(key, []).append(str(filename))
 
     return ReportSummary(
         total_files=len(row_list),
@@ -175,6 +183,9 @@ def summarize_rows(rows: Iterable[dict[str, Any]]) -> ReportSummary:
         exiftool_error=exiftool_error,
         exiftool_warning=exiftool_warning,
         exported_uuids=frozenset(exported_uuids) if uuid_present else None,
+        exported_paths=(
+            {uuid: tuple(paths) for uuid, paths in exported_paths.items()} if uuid_present else None
+        ),
         columns=frozenset(columns),
     )
 

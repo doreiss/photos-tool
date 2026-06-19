@@ -546,13 +546,26 @@ def test_send_warns_when_no_per_mac_subpath(tmp_path: Path, fake_tools, capsys):
     assert "no per-Mac subpath is set" in captured.err
 
 
+def _row_at(uuid: str, dest: Path, rel: str) -> dict[str, Any]:
+    # A report row whose destination filename is the actual copy written on the share.
+    return {**row(uuid), "filename": str(dest / rel)}
+
+
 def test_send_remove_originals_after_clean_export(tmp_path: Path, fake_tools, monkeypatch, capsys):
     from photos_tool.remove import RemoveResult
 
     mount = tmp_path / "share"
     mount.mkdir()
     config = write_config(tmp_path, mount)
-    fake_tools(scenario(mount, selected=2, report=[row("a"), row("b")]))
+    files = ["2024/01/a.heic", "2024/02/b.heic"]
+    fake_tools(
+        scenario(
+            mount,
+            selected=2,
+            report=[_row_at("a", mount, files[0]), _row_at("b", mount, files[1])],
+            files=files,
+        )
+    )
 
     seen: dict[str, object] = {}
 
@@ -570,6 +583,31 @@ def test_send_remove_originals_after_clean_export(tmp_path: Path, fake_tools, mo
     assert seen["uuids"] == ["a", "b"]
     assert "Moved 2 original(s) to Recently Deleted" in captured.out
     assert (tmp_path / "state" / "logs" / "removed.jsonl").exists()
+
+
+def test_send_remove_originals_skips_assets_missing_from_share(tmp_path, fake_tools, monkeypatch):
+    # A clean reconcile whose copies are NOT on the share (e.g. a re-run after the
+    # share was wiped) must not delete anything — the blocker the review caught.
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)
+    fake_tools(
+        scenario(
+            mount,
+            selected=2,
+            # report references copies that are never written to the share (files=[])
+            report=[_row_at("a", mount, "2024/01/a.heic"), _row_at("b", mount, "2024/02/b.heic")],
+            files=[],
+        )
+    )
+
+    called: list[object] = []
+    monkeypatch.setattr(cli, "remove_originals", lambda *a, **k: called.append(1))
+
+    rc = cli.main(["send", "--config", str(config), "--remove-originals", "--yes"])
+
+    assert rc == 0
+    assert called == []  # nothing deleted because no copy is on the share
 
 
 def test_send_remove_originals_blocked_when_not_clean(tmp_path: Path, fake_tools, monkeypatch):
@@ -598,7 +636,14 @@ def test_send_remove_dry_run_deletes_nothing(tmp_path: Path, fake_tools, monkeyp
     mount = tmp_path / "share"
     mount.mkdir()
     config = write_config(tmp_path, mount)
-    fake_tools(scenario(mount, selected=1, report=[row("a")]))
+    fake_tools(
+        scenario(
+            mount,
+            selected=1,
+            report=[_row_at("a", mount, "2024/01/a.heic")],
+            files=["2024/01/a.heic"],
+        )
+    )
 
     from photos_tool.remove import RemoveResult
 

@@ -36,7 +36,7 @@ from .osxphotos_runner import (
 )
 from .plan import ExportOptions, build_export_command
 from .reconcile import Reconciliation
-from .remove import RemoveError, gate_cleanup, remove_originals
+from .remove import RemoveError, gate_cleanup, remove_originals, select_removable
 from .report import (
     ReportError,
     ReportSummary,
@@ -672,7 +672,22 @@ def _maybe_remove_originals(
     if not allowed:
         print(f"Not removing originals: {reason}.", file=sys.stderr)
         return
-    uuids = sorted(report.exported_uuids or [])
+    # A clean reconciliation is not enough — only remove originals whose copy is
+    # verifiably on the share right now (a re-run reports already-known assets as
+    # "skipped" even if their copies were since deleted).
+    uuids, kept = select_removable(report, lambda path: Path(path).exists())
+    if kept:
+        print(
+            f"Keeping {len(kept)} original(s) in Photos — their copy is missing from the share "
+            "or shares a filename with another photo.",
+            file=sys.stderr,
+        )
+    if not uuids:
+        print(
+            "No originals are verified safe to remove (no copies confirmed on the share).",
+            file=sys.stderr,
+        )
+        return
     if args.remove_dry_run:
         # Verify the assets actually resolve in Photos (mapping + authorization) but
         # delete nothing — the safe preview before a real removal.
@@ -682,11 +697,11 @@ def _maybe_remove_originals(
             print(f"Remove dry run could not verify originals: {exc}", file=sys.stderr)
             return
         print(
-            f"Remove dry run: {result.requested} original(s) resolve in Photos and would move to "
-            "Recently Deleted (recoverable ~30 days). Nothing was deleted."
+            f"Remove dry run: {result.requested} original(s) are backed up on the share and would "
+            "move to Recently Deleted (recoverable ~30 days). Nothing was deleted."
         )
         return
-    print(f"\n{len(uuids)} original(s) reconciled as safely exported.")
+    print(f"\n{len(uuids)} original(s) verified backed up on the share.")
     if not args.yes:
         if not sys.stdin.isatty():
             print(
@@ -718,8 +733,15 @@ def _log_removed(log_dir: Path, uuids: Sequence[str]) -> None:
         "count": len(uuids),
         "removed_uuids": list(uuids),
     }
-    with (log_dir / "removed.jsonl").open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, sort_keys=True) + "\n")
+    try:
+        with (log_dir / "removed.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError as exc:
+        # The delete already happened and is recoverable; never crash over the log.
+        print(
+            f"Warning: removed originals but could not write the audit log: {exc}",
+            file=sys.stderr,
+        )
 
 
 def _export_options(

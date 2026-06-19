@@ -4,12 +4,26 @@ import pytest
 
 from photos_tool import remove
 from photos_tool.reconcile import reconcile
-from photos_tool.remove import RemoveError, RemoveResult, build_local_identifiers, gate_cleanup
+from photos_tool.remove import (
+    RemoveError,
+    RemoveResult,
+    build_local_identifiers,
+    gate_cleanup,
+    select_removable,
+)
 from photos_tool.report import ReportSummary
 
 
-def _summary(uuids: set[str] | None, *, missing: int = 0, error: int = 0) -> ReportSummary:
+def _summary(
+    uuids: set[str] | None,
+    *,
+    missing: int = 0,
+    error: int = 0,
+    paths: dict[str, tuple[str, ...]] | None = None,
+) -> ReportSummary:
     n = len(uuids) if uuids else 0
+    if uuids is not None and paths is None:
+        paths = {u: (f"/share/{u}.heic",) for u in uuids}
     return ReportSummary(
         total_files=n + missing + error,
         exported=n,
@@ -20,7 +34,35 @@ def _summary(uuids: set[str] | None, *, missing: int = 0, error: int = 0) -> Rep
         missing=missing,
         error=error,
         exported_uuids=frozenset(uuids) if uuids is not None else None,
+        exported_paths=paths,
     )
+
+
+def test_select_removable_only_returns_assets_whose_copy_is_on_the_share():
+    report = _summary({"a", "b"}, paths={"a": ("/share/a.heic",), "b": ("/share/b.heic",)})
+
+    removable, kept = select_removable(report, lambda p: p == "/share/a.heic")  # b's copy is gone
+
+    assert removable == ["a"]
+    assert [u for u, _ in kept] == ["b"]
+
+
+def test_select_removable_skips_filename_collisions():
+    report = _summary({"a", "b"}, paths={"a": ("/share/IMG.heic",), "b": ("/share/IMG.heic",)})
+
+    removable, kept = select_removable(report, lambda _p: True)
+
+    assert removable == []
+    assert sorted(u for u, _ in kept) == ["a", "b"]
+
+
+def test_select_removable_returns_all_when_present_and_distinct():
+    report = _summary({"a", "b"})
+
+    removable, kept = select_removable(report, lambda _p: True)
+
+    assert removable == ["a", "b"]
+    assert kept == []
 
 
 def test_build_local_identifiers_sorts_dedups_and_drops_empty():

@@ -1,16 +1,20 @@
 """Opt-in removal of just-exported originals from the Photos library.
 
-This is the one intentionally destructive feature, so it is fail-closed: it only
-ever runs after a clean reconciliation, deletes exactly the UUIDs that osxphotos
-reported as exported, aborts if any UUID does not resolve in Photos, and uses
-PhotoKit (not AppleScript, which cannot delete media items on recent macOS) so
-deletions land in Recently Deleted and stay recoverable for ~30 days.
+This is the one intentionally destructive feature, so it is fail-closed. It only
+runs after a clean reconciliation, and even then deletes an original only when its
+copy is verified to exist on the share right now (``select_removable`` — a clean
+reconcile alone is not enough, because a re-run reports already-known assets as
+"skipped" even if their copies were since deleted) and no two assets collide on one
+destination filename. It deletes exactly those UUIDs, aborts if any does not resolve
+in Photos, and uses PhotoKit (not AppleScript, which cannot delete media items on
+recent macOS) so deletions land in Recently Deleted, recoverable for ~30 days.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import Any
 
 from .reconcile import Reconciliation, Status
 from .report import ReportSummary
@@ -41,6 +45,39 @@ def gate_cleanup(reconciliation: Reconciliation, report: ReportSummary) -> tuple
 def build_local_identifiers(uuids: Iterable[str]) -> list[str]:
     """Map osxphotos UUIDs to PhotoKit local identifiers (``<uuid>/L0/001``)."""
     return [f"{uuid}/L0/001" for uuid in sorted({u for u in uuids if u})]
+
+
+def select_removable(
+    report: ReportSummary,
+    exists: Callable[[str], bool],
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Pick the UUIDs whose backup is verifiably on the share *right now* (pure).
+
+    A clean reconciliation is not enough: a re-run reports already-known assets as
+    ``skipped`` even if their copies were since deleted from the share, and two
+    assets can collide on one destination filename. So an original is only eligible
+    for deletion when every destination copy currently exists AND no copy is shared
+    with another asset. Returns ``(removable_uuids, [(uuid, reason_kept)])``.
+    """
+    paths_by_uuid = report.exported_paths or {}
+    owners: dict[str, set[str]] = {}
+    for uuid, paths in paths_by_uuid.items():
+        for path in paths:
+            owners.setdefault(path, set()).add(uuid)
+
+    removable: list[str] = []
+    kept: list[tuple[str, str]] = []
+    for uuid in sorted(report.exported_uuids or []):
+        paths = paths_by_uuid.get(uuid, ())
+        if not paths:
+            kept.append((uuid, "no destination path was recorded"))
+        elif any(len(owners.get(path, ())) > 1 for path in paths):
+            kept.append((uuid, "shares a destination filename with another photo"))
+        elif not all(exists(path) for path in paths):
+            kept.append((uuid, "its copy is not on the share"))
+        else:
+            removable.append(uuid)
+    return removable, kept
 
 
 def remove_originals(
@@ -77,7 +114,7 @@ def remove_originals(
     return RemoveResult(requested=len(local_ids), deleted=deleted, dry_run=False)
 
 
-def _import_photos():  # pragma: no cover - requires macOS PhotoKit
+def _import_photos() -> Any:  # pragma: no cover - requires macOS PhotoKit
     try:
         import Photos  # pyright: ignore[reportMissingImports]
     except ImportError as exc:
@@ -87,7 +124,7 @@ def _import_photos():  # pragma: no cover - requires macOS PhotoKit
     return Photos
 
 
-def _require_authorization(photos) -> None:  # pragma: no cover - requires TCC grant
+def _require_authorization(photos: Any) -> None:  # pragma: no cover - requires TCC grant
     level = photos.PHAccessLevelReadWrite
     status = photos.PHPhotoLibrary.authorizationStatusForAccessLevel_(level)
     if status != photos.PHAuthorizationStatusAuthorized:
@@ -98,7 +135,7 @@ def _require_authorization(photos) -> None:  # pragma: no cover - requires TCC g
         )
 
 
-def _perform_delete(photos, fetch) -> int:  # pragma: no cover - requires PhotoKit
+def _perform_delete(photos: Any, fetch: Any) -> int:  # pragma: no cover - requires PhotoKit
     count = fetch.count()
 
     def changes() -> None:

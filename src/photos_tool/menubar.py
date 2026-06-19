@@ -83,7 +83,17 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
 
         @rumps.clicked("Run Diagnostics")
         def diagnostics(self, _: rumps.MenuItem) -> None:
-            subprocess.run([exe, "doctor"], env=env, check=False)
+            # doctor talks only via stdout/stderr; a Finder-launched app has no
+            # terminal, so capture the output and show it in a dialog.
+            try:
+                proc = subprocess.run(
+                    [exe, "doctor"], env=env, capture_output=True, text=True, check=False
+                )
+            except OSError as exc:
+                rumps.alert("Diagnostics failed", str(exc))
+                return
+            output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+            rumps.alert("photos-tool diagnostics", output or "doctor produced no output")
 
     PhotosToolApp().run()
 
