@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -102,9 +102,17 @@ def run_export(
 
 
 def probe_optimize_storage_risk(opts: ExportOptions) -> float:
+    # Diagnostic only: run the dry-run against a throwaway local destination and DB so
+    # `doctor` never mounts/creates folders on the share. The missing fraction (cloud-only
+    # originals) is independent of where the export would land.
     with tempfile.TemporaryDirectory(prefix="photos-tool-dry-run-") as tmp:
         report_path = Path(tmp) / "report.json"
-        result = run_export(opts, report_path, dry_run=True)
+        probe_opts = replace(
+            opts,
+            destination=str(Path(tmp) / "dest"),
+            exportdb=str(Path(tmp) / "exportdb"),
+        )
+        result = run_export(probe_opts, report_path, dry_run=True)
         if not result.ok:
             raise OsxphotosError(_format_failure(result.command, result))
         summary = parse_report(report_path)

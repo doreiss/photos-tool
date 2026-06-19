@@ -127,6 +127,14 @@ def _cmd_send(args: argparse.Namespace) -> int:
     scope = "album" if args.album else "selected"
     album = args.album
 
+    if config.destination.smb_url and not config.destination.subpath:
+        print(
+            "Warning: no per-Mac subpath is set (destination.subpath is empty). If other Macs "
+            "back up to this share, photos that share a name like IMG_0001 can overwrite each "
+            "other. Run 'photos-tool init' to set a per-Mac subfolder.",
+            file=sys.stderr,
+        )
+
     statuses = probe_all()
     missing = missing_required(statuses)
     if mp4:
@@ -158,7 +166,13 @@ def _cmd_send(args: argparse.Namespace) -> int:
         return EXIT_PREFLIGHT
 
     if selected == 0:
-        print("Nothing selected. Select photos in Photos first, then run photos-tool send.")
+        if scope == "album":
+            print(
+                f"No photos matched album {album!r}. Album names are case-sensitive — "
+                "check the spelling, or that the album actually contains photos."
+            )
+        else:
+            print("Nothing selected. Select photos in Photos first, then run photos-tool send.")
         return EXIT_NOTHING_SELECTED
 
     log_dir = Path(config.state.log_dir).expanduser()
@@ -169,9 +183,10 @@ def _cmd_send(args: argparse.Namespace) -> int:
     if args.dry_run:
         return _send_dry_run(opts, selected)
 
-    # Guard against a double-pressed hotkey launching two overlapping exports to
-    # the same share. The handle is held for the rest of this run; the OS releases
-    # the flock when the process exits or the handle is closed.
+    # Guard against a double-pressed hotkey launching two overlapping exports on THIS
+    # Mac (the lock file lives in the local state dir, so it serializes same-Mac runs
+    # only; per-Mac subpaths keep different Macs out of each other's trees). The handle
+    # is held for the rest of this run; the OS releases the flock on exit/close.
     lock = _acquire_destination_lock(exportdb_dir, destination)
     if lock is None:
         print(
@@ -607,10 +622,11 @@ def _ensure_destination_ready(config: Config, destination: Path) -> str | None:
 def _acquire_destination_lock(exportdb_dir: Path, destination: Path):
     """Take a non-blocking per-destination lock, or return ``None`` if busy.
 
-    Keyed on the same destination hash as the export DB so two concurrent sends
-    to the *same* share are blocked while sends to different shares run freely.
-    The caller holds the returned handle for the run; the flock is advisory and
-    released automatically when the handle is closed or the process exits.
+    The lock file lives in the local state dir and is keyed on the destination
+    hash, so it serializes two sends to the same destination *on this Mac* (the
+    double-pressed-hotkey case). It does not coordinate across Macs — per-Mac
+    subpaths keep different Macs in different trees. The caller holds the handle
+    for the run; the flock is released automatically on close or process exit.
     """
     exportdb_dir.mkdir(parents=True, exist_ok=True)
     stem = resolved_exportdb_path(destination, exportdb_dir).stem

@@ -519,6 +519,33 @@ def test_send_mp4_conversion_error_exits_five(tmp_path: Path, fake_tools, capsys
     assert "conversion error" in captured.err
 
 
+def test_send_album_typo_reports_album_specific_message(tmp_path: Path, fake_tools, capsys):
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)
+    tools = fake_tools(scenario(mount, selected=0))
+
+    rc = cli.main(["send", "--config", str(config), "--album", "Hawaii 2019"])
+    captured = capsys.readouterr()
+
+    assert rc == 4
+    assert "No photos matched album 'Hawaii 2019'" in captured.out
+    assert "Nothing selected" not in captured.out
+    assert osxphotos_exports(tools.log()) == []
+
+
+def test_send_warns_when_no_per_mac_subpath(tmp_path: Path, fake_tools, capsys):
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)  # smb_url set, subpath = ""
+    fake_tools(scenario(mount, selected=1, report=[row("asset-1")]))
+
+    cli.main(["send", "--config", str(config)])
+    captured = capsys.readouterr()
+
+    assert "no per-Mac subpath is set" in captured.err
+
+
 def test_doctor_runs_fake_preflight_and_dry_run(tmp_path: Path, fake_tools, capsys):
     mount = tmp_path / "share"
     mount.mkdir()
