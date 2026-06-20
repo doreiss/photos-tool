@@ -17,3 +17,6 @@ dist/
 report*.csv
 # ...except the synthetic, non-personal test fixture
 !tests/fixtures/report.csv
+
+# Agent worktrees / session scratch
+.claude/
