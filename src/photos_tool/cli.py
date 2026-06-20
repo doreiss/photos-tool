@@ -112,7 +112,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
 
     started = time.monotonic()
     try:
-        destination = config.destination_path(args.destination)
+        destination = config.destination_path()
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
@@ -237,6 +237,29 @@ def _cmd_send(args: argparse.Namespace) -> int:
             )
             return EXIT_PREFLIGHT
 
+        # Fail CLOSED if a REQUIRED column is absent (e.g. osxphotos renamed/removed it):
+        # a missing 'missing'/'error'/'exported' column would otherwise read as False and
+        # silently count an unexported asset as backed up — never record a token from that.
+        shape_gap = missing_expected_columns(report)
+        if shape_gap:
+            print(
+                "report error: the osxphotos report is missing required column(s) "
+                f"({', '.join(sorted(shape_gap))}); refusing to reconcile or record a backup "
+                "(its format may have changed — originals are NOT safe to delete).",
+                file=sys.stderr,
+            )
+            _write_run_log(
+                log_dir,
+                started=started,
+                exit_code=EXIT_PREFLIGHT,
+                scope=scope,
+                selected=selected,
+                exported=0,
+                missing=0,
+                error=0,
+            )
+            return EXIT_PREFLIGHT
+
         _print_summary(destination, selected, report, reconciliation.message)
         _warn_report_shape(report)
 
@@ -323,12 +346,18 @@ def _cmd_send(args: argparse.Namespace) -> int:
             exiftool_warning=report.exiftool_warning,
         )
 
-        # Record this batch (with each landed copy's size) so cleanup-last can later
-        # remove exactly these originals — never automatically, always a separate step.
+        # Record this batch (content-fingerprinting each landed copy) so cleanup-last can
+        # later remove exactly these originals — never automatically, always a separate step.
         if exit_code == EXIT_OK and report.exported_paths:
-            state.save_backup_token(
+            skipped = state.save_backup_token(
                 log_dir, destination, config.destination.smb_url, report.exported_paths
             )
+            if skipped:
+                print(
+                    f"Note: {len(skipped)} photo(s) could not be fully verified on the share and "
+                    "will NOT be offered for cleanup; re-run send once the share is healthy.",
+                    file=sys.stderr,
+                )
 
         return exit_code
 
@@ -524,7 +553,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan.set_defaults(func=_cmd_plan)
 
     p_send = sub.add_parser("send", help="export selected Photos items to the destination")
-    p_send.add_argument("destination", nargs="?", help="mounted SMB share path; overrides config")
+    # No positional destination: send is config-only so the recorded backup token is always
+    # keyed to the destination cleanup-last queries (an ad-hoc override would strand the token).
     _add_runtime_options(p_send)
     p_send.add_argument("--dry-run", action="store_true", help="simulate export and parse report")
     p_send.add_argument("--verbose", action="store_true", help="print captured osxphotos output")
@@ -618,6 +648,22 @@ def _print_missing_tools(missing: Sequence[ToolStatus]) -> None:
     )
 
 
+def _on_boot_volume(path: Path) -> bool:
+    """True if ``path`` (or its nearest existing parent) sits on the same device as ``/``.
+
+    Used to refuse a destination that resolves to this Mac's own boot disk — e.g. a stale
+    ``/Volumes/<share>`` directory left after an unclean unmount. Backing up there and then
+    deleting originals would leave the only copy on the same disk as the Photos library.
+    """
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    try:
+        return probe.stat().st_dev == Path("/").stat().st_dev
+    except OSError:
+        return False
+
+
 def _ensure_destination_ready(config: Config, destination: Path) -> str | None:
     mount_point = Path(config.destination.mount_point).expanduser()
     try:
@@ -628,6 +674,14 @@ def _ensure_destination_ready(config: Config, destination: Path) -> str | None:
             if not destination.exists() and not is_writable(mount_point):
                 return f"{mount_point} is not writable"
             return None
+        # smb_url is empty (manual-mount config): there is NO mount verification here, so a
+        # stale /Volumes dir on the boot disk would look "ready". Refuse the boot volume.
+        if _on_boot_volume(destination):
+            return (
+                f"{destination} is on this Mac's boot disk, not a mounted share — refusing to "
+                "use the Mac's own disk as the backup destination. Set destination.smb_url to "
+                "your share and mount it (a backup on the same disk as the library is no backup)."
+            )
         if destination.exists() and is_writable(destination):
             return None
         if (
@@ -672,7 +726,17 @@ def _cmd_cleanup_last(args: argparse.Namespace) -> int:
     log_dir = Path(config.state.log_dir).expanduser()
     token = state.load_backup_token(log_dir, destination)
     if token is None or not token.assets:
-        print("No backup recorded for this destination yet. Run a backup first.", file=sys.stderr)
+        if token is None and state.stale_token_exists(log_dir, destination):
+            print(
+                "A backup from an older version of photos-tool cannot be auto-cleaned; "
+                "re-run send to record a fresh one.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "No backup recorded for this destination yet. Run a backup first.",
+                file=sys.stderr,
+            )
         return EXIT_USAGE
 
     # Re-validate the share is the configured one and is mounted before trusting any
@@ -696,7 +760,7 @@ def _cmd_cleanup_last(args: argparse.Namespace) -> int:
                 {
                     "count": len(removable),
                     "destination": token.destination_root,
-                    "reveal": state.reveal_path(token),
+                    "reveal": state.reveal_paths(token, set(removable)),
                 }
             )
         )
@@ -876,17 +940,12 @@ def _print_summary(
 
 
 def _warn_report_shape(report: ReportSummary) -> None:
+    # Missing REQUIRED columns are already a hard EXIT_PREFLIGHT in _cmd_send (we never
+    # reach here in that case); this only surfaces unexpected NEW columns, informationally.
     extra = unexpected_columns(report)
-    missing = missing_expected_columns(report)
     if extra:
         print(
             "Warning: osxphotos report had unexpected column(s): " + ", ".join(sorted(extra)),
-            file=sys.stderr,
-        )
-    if missing:
-        print(
-            "Warning: osxphotos report was missing expected column(s): "
-            + ", ".join(sorted(missing)),
             file=sys.stderr,
         )
 

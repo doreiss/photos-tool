@@ -151,6 +151,27 @@ def test_cleanup_keeps_original_when_copy_grows_after_backup(tmp_path, fake_tool
     assert json.loads(capsys.readouterr().out)["count"] == 0
 
 
+def test_cleanup_keeps_original_when_copy_same_size_different_content(tmp_path, fake_tools, capsys):
+    """Guards (end-to-end): a same-size overwrite with the ORIGINAL mtime restored — so size
+    and mtime both still match — is still caught by the head/tail content hash. The original
+    is kept; this exercises content discrimination through the real send->cleanup pipeline."""
+    import os
+
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config, _tools = _backup_one(tmp_path, mount, fake_tools)
+    capsys.readouterr()
+
+    copy = mount / "2024" / "01" / "a.heic"
+    st = copy.stat()
+    assert st.st_size == 4  # "fake"
+    copy.write_text("FAKE", encoding="utf-8")  # same 4 bytes, different content
+    os.utime(copy, ns=(st.st_atime_ns, st.st_mtime_ns))  # restore mtime: ONLY content differs
+
+    assert cli.main(["cleanup-last", "--config", str(config), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["count"] == 0
+
+
 # --- 3. backup to A, then backup to B, then cleanup acts on the CONFIGURED dest only ----------
 
 

@@ -76,7 +76,10 @@ class Config:
         """Return the final export destination, including any configured subpath."""
         base = override or self.destination.mount_point
         if not base:
-            raise ConfigError("destination is required: pass DEST or set destination.mount_point")
+            raise ConfigError(
+                "destination is required: set destination.mount_point in config "
+                "(or pass a destination to plan/doctor)"
+            )
         path = Path(base).expanduser()
         if self.destination.subpath:
             path = path / self.destination.subpath

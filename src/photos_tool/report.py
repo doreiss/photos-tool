@@ -31,13 +31,11 @@ EXPECTED_REPORT_COLUMNS = {
     "exported",
     "external_edit",
     "filename",
-    "fingerprint",
     "info_sidecar",
     "jpeg_ext",
     "jpeg_path",
     "json_sidecar",
     "keyword",
-    "live_photo",
     "missing",
     "new",
     "original",
@@ -157,10 +155,12 @@ def summarize_rows(rows: Iterable[dict[str, Any]]) -> ReportSummary:
         columns.update(str(key) for key in row)
         row_missing = _truthy(row.get("missing"))
         row_error = _truthy(row.get("error"))
-        exported += int(_truthy(row.get("exported")))
+        row_exported = _truthy(row.get("exported"))
+        row_skipped = _truthy(row.get("skipped"))
+        exported += int(row_exported)
         new += int(_truthy(row.get("new")))
         updated += int(_truthy(row.get("updated")))
-        skipped += int(_truthy(row.get("skipped")))
+        skipped += int(row_skipped)
         converted += int(_truthy(row.get("converted_to_jpeg")))
         missing += int(row_missing)
         error += int(row_error)
@@ -170,12 +170,20 @@ def summarize_rows(rows: Iterable[dict[str, Any]]) -> ReportSummary:
         uuid = row.get("uuid")
         if uuid not in (None, ""):
             uuid_present = True
-            if not row_missing and not row_error:
+            # A path may back a deletion only from a row that POSITIVELY exported or
+            # skipped (already-present) — not merely "not missing and not error". A
+            # touched-only / metadata-only row does not assert the bytes are on the share.
+            if not row_missing and not row_error and (row_exported or row_skipped):
                 key = str(uuid)
                 paths = exported_paths.setdefault(key, [])
                 filename = row.get("filename")
                 if filename not in (None, ""):
                     paths.append(str(filename))
+                else:
+                    # A positively-exported constituent with no filename can't be verified on
+                    # the share. Poison the uuid with a non-absolute sentinel so the token's
+                    # all-or-nothing rule drops the WHOLE asset (never a partial record).
+                    paths.append("")
 
     return ReportSummary(
         total_files=len(row_list),

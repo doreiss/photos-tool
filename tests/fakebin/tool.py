@@ -76,7 +76,23 @@ def _pick_report(scenario: dict, destination: Path, dry_run: bool) -> list[dict]
         return list(scenario.get("dry_report", scenario.get("report", [])))
     if destination.name == "compat":
         return list(scenario.get("jpeg_report", scenario.get("report", [])))
-    return list(scenario.get("report", []))
+    if "report" in scenario:
+        return list(scenario["report"])
+    # No explicit report: DERIVE the rows from the files actually written, so the report
+    # can never silently disagree with what is on disk (the delete gate's core invariant).
+    # uuid = the file stem, so a multi-file asset (a.heic + a.mov) groups under one uuid.
+    return [
+        {
+            "uuid": Path(rel).stem,
+            "filename": str(destination / rel),
+            "exported": True,
+            "new": True,
+            "skipped": False,
+            "missing": False,
+            "error": False,
+        }
+        for rel in _pick_files(scenario, destination)
+    ]
 
 
 def _pick_files(scenario: dict, destination: Path) -> list[str]:

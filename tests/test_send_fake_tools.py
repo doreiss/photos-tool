@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from photos_tool import cli
 
 
@@ -585,7 +587,174 @@ def test_send_records_a_backup_token(tmp_path: Path, fake_tools):
     assert token is not None
     assert sorted(asset.uuid for asset in token.assets) == ["a", "b"]
     # The recorded size matches the bytes the fake wrote ("fake" == 4 bytes).
-    assert all(size == 4 for asset in token.assets for _path, size in asset.files)
+    assert all(f.size == 4 for asset in token.assets for f in asset.files)
+
+
+def test_send_with_derived_report_cannot_disagree_with_disk(tmp_path: Path, fake_tools, capsys):
+    # F14: with no explicit report, the fake DERIVES the report from the files it writes, so
+    # the token records exactly what is on disk (the report can't silently disagree).
+    from photos_tool import state
+
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)
+    files = ["2024/01/a.heic", "2024/02/b.mov"]
+    s = scenario(mount, selected=2, files=files)
+    del s["report"]  # force the derive-from-files path
+    fake_tools(s)
+
+    assert cli.main(["send", "--config", str(config)]) == 0
+    capsys.readouterr()
+
+    token = state.load_backup_token(tmp_path / "state" / "logs", mount)
+    assert token is not None
+    recorded = sorted(f.path for asset in token.assets for f in asset.files)
+    assert recorded == sorted(str(mount / rel) for rel in files)
+
+
+def test_send_warns_and_drops_a_partial_live_photo(tmp_path: Path, fake_tools, capsys):
+    # F5 at the CLI: a Live Photo whose MOV never lands is dropped WHOLE from the token, and
+    # the user is told a photo could not be verified (never silently excluded).
+    from photos_tool import state
+
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)
+    heic, mov = "2024/08/live.heic", "2024/08/live.mov"
+    fake_tools(
+        scenario(
+            mount,
+            selected=1,
+            report=[_row_at("live", mount, heic), _row_at("live", mount, mov)],
+            files=[heic],  # the MOV never lands on the share
+        )
+    )
+
+    assert cli.main(["send", "--config", str(config)]) == 0
+    assert "could not be fully verified" in capsys.readouterr().err
+
+    token = state.load_backup_token(tmp_path / "state" / "logs", mount)
+    assert token is not None and token.assets == ()  # whole Live Photo dropped
+
+
+@pytest.mark.parametrize("drop", ["filename", "exported", "missing", "error"])
+def test_send_fails_closed_when_any_required_column_is_missing(
+    tmp_path: Path, fake_tools, capsys, drop: str
+):
+    # F9: a report missing ANY required column must fail closed (EXIT_PREFLIGHT) and record NO
+    # token, rather than read the absent column as False and trust the row.
+    from photos_tool import state
+
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)
+    full = {
+        "uuid": "a",
+        "filename": str(mount / "2024/01/a.heic"),
+        "exported": True,
+        "missing": False,
+        "error": False,
+    }
+    row_without = {k: v for k, v in full.items() if k != drop}
+    fake_tools(scenario(mount, selected=1, report=[row_without], files=["2024/01/a.heic"]))
+
+    rc = cli.main(["send", "--config", str(config)])
+    assert rc == cli.EXIT_PREFLIGHT
+    assert "missing required column" in capsys.readouterr().err
+    assert state.load_backup_token(tmp_path / "state" / "logs", mount) is None
+
+
+def test_send_drops_asset_with_an_empty_filename_constituent(tmp_path: Path, fake_tools, capsys):
+    # An exported constituent with an EMPTY filename can't be verified; the WHOLE asset is
+    # dropped from the token (never recorded as a complete-looking single-file asset).
+    from photos_tool import state
+
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)
+    heic = "2024/08/live.heic"
+    rows = [
+        _row_at("live", mount, heic),
+        {**row("live"), "filename": ""},  # positively exported, but no filename
+    ]
+    fake_tools(scenario(mount, selected=1, report=rows, files=[heic]))
+
+    assert cli.main(["send", "--config", str(config)]) == 0
+    assert "could not be fully verified" in capsys.readouterr().err
+    token = state.load_backup_token(tmp_path / "state" / "logs", mount)
+    assert token is not None and token.assets == ()
+
+
+def _empty_smb_config(tmp_path: Path, mount: Path) -> Path:
+    config = tmp_path / "config-nosmb.toml"
+    config.write_text(
+        f"""
+[destination]
+smb_url = ""
+mount_point = {str(mount)!r}
+subpath = ""
+
+[export]
+directory_template = "{{created.year}}/{{created.mm}}"
+filename_template = "{{original_name}}"
+download_missing = true
+use_photokit = false
+retry = 3
+
+[copies]
+jpeg = false
+jpeg_quality = 0.9
+mp4 = false
+mp4_crf = 20
+
+[state]
+exportdb_dir = {str(tmp_path / "state" / "exportdb")!r}
+log_dir = {str(tmp_path / "state" / "logs")!r}
+""",
+        encoding="utf-8",
+    )
+    return config
+
+
+def test_on_boot_volume_detects_the_root_device():
+    from pathlib import Path as _P
+
+    assert cli._on_boot_volume(_P("/")) is True
+    # A nonexistent path resolves to its nearest existing parent (root) -> boot volume.
+    assert cli._on_boot_volume(_P("/no-such-dir-xyzzy/sub")) is True
+
+
+def test_boot_volume_destination_refused_for_send_and_cleanup(
+    tmp_path: Path, fake_tools, capsys, monkeypatch
+):
+    # F8: with an empty smb_url (manual-mount config) there is no mount check, so a stale
+    # boot-disk path would look ready. Both send AND cleanup must refuse the boot volume.
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = _empty_smb_config(tmp_path, mount)
+    fake_tools(
+        scenario(
+            mount,
+            selected=1,
+            report=[_row_at("a", mount, "2024/01/a.heic")],
+            files=["2024/01/a.heic"],
+        )
+    )
+
+    # Force the boot-volume reading deterministically (portable across macOS/Linux CI).
+    monkeypatch.setattr(cli, "_on_boot_volume", lambda p: True)
+    assert cli.main(["send", "--config", str(config)]) == cli.EXIT_PREFLIGHT
+    assert "boot disk" in capsys.readouterr().err
+
+    # Off the boot volume, the same send proceeds and records a token.
+    monkeypatch.setattr(cli, "_on_boot_volume", lambda p: False)
+    assert cli.main(["send", "--config", str(config)]) == 0
+    capsys.readouterr()
+
+    # Cleanup shares _ensure_destination_ready, so it refuses the boot volume too.
+    monkeypatch.setattr(cli, "_on_boot_volume", lambda p: True)
+    assert cli.main(["cleanup-last", "--config", str(config), "--yes"]) == cli.EXIT_PREFLIGHT
+    assert "boot disk" in capsys.readouterr().err
 
 
 def _record_a_backup(tmp_path: Path, mount: Path, fake_tools) -> Path:
@@ -611,7 +780,9 @@ def test_cleanup_last_json_counts_copies_present_on_share(tmp_path: Path, fake_t
     assert cli.main(["cleanup-last", "--config", str(config), "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["count"] == 1
-    assert data["reveal"].endswith("2024/01/a.heic")
+    assert isinstance(data["reveal"], list)
+    assert len(data["reveal"]) == 1
+    assert data["reveal"][0].endswith("2024/01/a.heic")
 
 
 def test_cleanup_last_json_count_zero_when_copy_gone(tmp_path: Path, fake_tools, capsys):
