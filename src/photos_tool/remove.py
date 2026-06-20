@@ -80,7 +80,7 @@ def _import_photos() -> Any:  # pragma: no cover - requires macOS PhotoKit
         import Photos  # pyright: ignore[reportMissingImports]
     except ImportError as exc:
         raise RemoveError(
-            "PhotoKit (pyobjc) is unavailable; --remove-originals only works on macOS"
+            "PhotoKit (pyobjc) is unavailable; cleanup-last only works on macOS"
         ) from exc
     return Photos
 

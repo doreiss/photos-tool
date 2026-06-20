@@ -15,8 +15,10 @@ dist/
 .osxphotos_export.db
 *.osxphotos_export.db
 report*.csv
-# ...except the synthetic, non-personal test fixture
-!tests/fixtures/report.csv
+report*.json
+# ...except the synthetic, non-personal test fixtures
+!tests/fixtures/report*.csv
+!tests/fixtures/report*.json
 
 # Agent worktrees / session scratch
 .claude/
