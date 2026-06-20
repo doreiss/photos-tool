@@ -61,7 +61,6 @@ class StateConfig:
 
 @dataclass(frozen=True)
 class RemoveConfig:
-    enabled: bool = False
     max_delete: int = 500
 
 
@@ -185,10 +184,7 @@ def _parse_remove(raw: dict[str, Any]) -> RemoveConfig:
     max_delete = _int(raw, "max_delete", 500)
     if max_delete < 1:
         raise ConfigError("remove.max_delete must be at least 1")
-    return RemoveConfig(
-        enabled=_bool(raw, "enabled", False),
-        max_delete=max_delete,
-    )
+    return RemoveConfig(max_delete=max_delete)
 
 
 def _str(raw: dict[str, Any], key: str, default: str) -> str:

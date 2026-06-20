@@ -32,7 +32,15 @@ def row(
     }
 
 
-def write_config(tmp_path: Path, mount_point: Path) -> Path:
+def write_config(
+    tmp_path: Path,
+    mount_point: Path,
+    *,
+    jpeg: bool = False,
+    mp4: bool = False,
+    use_photokit: bool = False,
+) -> Path:
+    # Preferences are config-only now, so tests configure JPEG/MP4/PhotoKit here.
     config = tmp_path / "config.toml"
     config.write_text(
         f"""
@@ -45,13 +53,13 @@ subpath = ""
 directory_template = "{{created.year}}/{{created.mm}}"
 filename_template = "{{original_name}}"
 download_missing = true
-use_photokit = false
+use_photokit = {str(use_photokit).lower()}
 retry = 3
 
 [copies]
-jpeg = false
+jpeg = {str(jpeg).lower()}
 jpeg_quality = 0.9
-mp4 = false
+mp4 = {str(mp4).lower()}
 mp4_crf = 20
 
 [state]
@@ -306,10 +314,10 @@ def test_send_dry_run_warns_on_high_missing_fraction(tmp_path: Path, fake_tools,
 def test_send_use_photokit_modifies_download_missing_and_warns(tmp_path: Path, fake_tools, capsys):
     mount = tmp_path / "share"
     mount.mkdir()
-    config = write_config(tmp_path, mount)
+    config = write_config(tmp_path, mount, use_photokit=True)
     tools = fake_tools(scenario(mount, selected=1, report=[row("asset-1")]))
 
-    rc = cli.main(["send", "--config", str(config), "--use-photokit"])
+    rc = cli.main(["send", "--config", str(config)])
     captured = capsys.readouterr()
 
     assert rc == 0
@@ -353,7 +361,7 @@ def test_send_fails_when_mounted_share_is_not_writable(tmp_path: Path, fake_tool
 def test_send_jpeg_runs_parallel_compat_export(tmp_path: Path, fake_tools, capsys):
     mount = tmp_path / "share"
     mount.mkdir()
-    config = write_config(tmp_path, mount)
+    config = write_config(tmp_path, mount, jpeg=True)
     tools = fake_tools(
         scenario(
             mount,
@@ -364,7 +372,7 @@ def test_send_jpeg_runs_parallel_compat_export(tmp_path: Path, fake_tools, capsy
         )
     )
 
-    rc = cli.main(["send", "--config", str(config), "--jpeg"])
+    rc = cli.main(["send", "--config", str(config)])
     captured = capsys.readouterr()
 
     assert rc == 0
@@ -382,7 +390,7 @@ def test_send_jpeg_runs_parallel_compat_export(tmp_path: Path, fake_tools, capsy
 def test_send_jpeg_failure_exits_five_after_original_export(tmp_path: Path, fake_tools, capsys):
     mount = tmp_path / "share"
     mount.mkdir()
-    config = write_config(tmp_path, mount)
+    config = write_config(tmp_path, mount, jpeg=True)
     fake_tools(
         scenario(
             mount,
@@ -392,7 +400,7 @@ def test_send_jpeg_failure_exits_five_after_original_export(tmp_path: Path, fake
         )
     )
 
-    rc = cli.main(["send", "--config", str(config), "--jpeg"])
+    rc = cli.main(["send", "--config", str(config)])
     captured = capsys.readouterr()
 
     assert rc == 5
@@ -406,7 +414,7 @@ def test_send_jpeg_fewer_compat_copies_is_not_fatal(tmp_path: Path, fake_tools, 
     # the exit code.
     mount = tmp_path / "share"
     mount.mkdir()
-    config = write_config(tmp_path, mount)
+    config = write_config(tmp_path, mount, jpeg=True)
     fake_tools(
         scenario(
             mount,
@@ -418,7 +426,7 @@ def test_send_jpeg_fewer_compat_copies_is_not_fatal(tmp_path: Path, fake_tools, 
         )
     )
 
-    rc = cli.main(["send", "--config", str(config), "--jpeg"])
+    rc = cli.main(["send", "--config", str(config)])
     captured = capsys.readouterr()
 
     assert rc == 0
@@ -428,7 +436,7 @@ def test_send_jpeg_fewer_compat_copies_is_not_fatal(tmp_path: Path, fake_tools, 
 def test_send_mp4_transcodes_standalone_hevc_only(tmp_path: Path, fake_tools):
     mount = tmp_path / "share"
     mount.mkdir()
-    config = write_config(tmp_path, mount)
+    config = write_config(tmp_path, mount, mp4=True)
     tools = fake_tools(
         scenario(
             mount,
@@ -443,7 +451,7 @@ def test_send_mp4_transcodes_standalone_hevc_only(tmp_path: Path, fake_tools):
         )
     )
 
-    assert cli.main(["send", "--config", str(config), "--mp4"]) == 0
+    assert cli.main(["send", "--config", str(config)]) == 0
     log = tools.log()
     ffmpeg_calls = [
         entry["argv"] for entry in log if entry["tool"] == "ffmpeg" and "-i" in entry["argv"]
@@ -464,7 +472,7 @@ def test_send_mp4_transcodes_standalone_hevc_only(tmp_path: Path, fake_tools):
 def test_send_jpeg_mp4_transcodes_from_main_tree_into_compat(tmp_path: Path, fake_tools):
     mount = tmp_path / "share"
     mount.mkdir()
-    config = write_config(tmp_path, mount)
+    config = write_config(tmp_path, mount, jpeg=True, mp4=True)
     tools = fake_tools(
         scenario(
             mount,
@@ -479,7 +487,7 @@ def test_send_jpeg_mp4_transcodes_from_main_tree_into_compat(tmp_path: Path, fak
         )
     )
 
-    assert cli.main(["send", "--config", str(config), "--jpeg", "--mp4"]) == 0
+    assert cli.main(["send", "--config", str(config)]) == 0
 
     ffmpeg_calls = [
         entry["argv"]
@@ -501,7 +509,7 @@ def test_send_jpeg_mp4_transcodes_from_main_tree_into_compat(tmp_path: Path, fak
 def test_send_mp4_conversion_error_exits_five(tmp_path: Path, fake_tools, capsys):
     mount = tmp_path / "share"
     mount.mkdir()
-    config = write_config(tmp_path, mount)
+    config = write_config(tmp_path, mount, mp4=True)
     fake_tools(
         scenario(
             mount,
@@ -513,7 +521,7 @@ def test_send_mp4_conversion_error_exits_five(tmp_path: Path, fake_tools, capsys
         )
     )
 
-    rc = cli.main(["send", "--config", str(config), "--mp4"])
+    rc = cli.main(["send", "--config", str(config)])
     captured = capsys.readouterr()
 
     assert rc == 5
@@ -552,8 +560,8 @@ def _row_at(uuid: str, dest: Path, rel: str) -> dict[str, Any]:
     return {**row(uuid), "filename": str(dest / rel)}
 
 
-def test_send_remove_originals_after_clean_export(tmp_path: Path, fake_tools, monkeypatch, capsys):
-    from photos_tool.remove import RemoveResult
+def test_send_records_a_backup_token(tmp_path: Path, fake_tools):
+    from photos_tool import state
 
     mount = tmp_path / "share"
     mount.mkdir()
@@ -568,74 +576,16 @@ def test_send_remove_originals_after_clean_export(tmp_path: Path, fake_tools, mo
         )
     )
 
-    seen: dict[str, object] = {}
+    assert cli.main(["send", "--config", str(config)]) == 0
 
-    def fake_remove(uuids, *, dry_run=False, max_delete=500):
-        ids = sorted(uuids)
-        seen["uuids"] = ids
-        return RemoveResult(requested=len(ids), deleted=len(ids), dry_run=dry_run)
-
-    monkeypatch.setattr(cli, "remove_originals", fake_remove)
-
-    rc = cli.main(["send", "--config", str(config), "--remove-originals", "--yes"])
-    captured = capsys.readouterr()
-
-    assert rc == 0
-    assert seen["uuids"] == ["a", "b"]
-    assert "Moved 2 original(s) to Recently Deleted" in captured.out
-    assert (tmp_path / "state" / "logs" / "removed.jsonl").exists()
+    token = state.load_backup_token(tmp_path / "state" / "logs", mount)
+    assert token is not None
+    assert sorted(asset.uuid for asset in token.assets) == ["a", "b"]
+    # The recorded size matches the bytes the fake wrote ("fake" == 4 bytes).
+    assert all(size == 4 for asset in token.assets for _path, size in asset.files)
 
 
-def test_send_remove_originals_skips_assets_missing_from_share(tmp_path, fake_tools, monkeypatch):
-    # A clean reconcile whose copies are NOT on the share (e.g. a re-run after the
-    # share was wiped) must not delete anything — the blocker the review caught.
-    mount = tmp_path / "share"
-    mount.mkdir()
-    config = write_config(tmp_path, mount)
-    fake_tools(
-        scenario(
-            mount,
-            selected=2,
-            # report references copies that are never written to the share (files=[])
-            report=[_row_at("a", mount, "2024/01/a.heic"), _row_at("b", mount, "2024/02/b.heic")],
-            files=[],
-        )
-    )
-
-    called: list[object] = []
-    monkeypatch.setattr(cli, "remove_originals", lambda *a, **k: called.append(1))
-
-    rc = cli.main(["send", "--config", str(config), "--remove-originals", "--yes"])
-
-    assert rc == 0
-    assert called == []  # nothing deleted because no copy is on the share
-
-
-def test_send_remove_originals_blocked_when_not_clean(tmp_path: Path, fake_tools, monkeypatch):
-    mount = tmp_path / "share"
-    mount.mkdir()
-    config = write_config(tmp_path, mount)
-    fake_tools(
-        scenario(
-            mount,
-            selected=2,
-            report=[row("a"), row("b", exported=False, new=False, missing=True)],
-        )
-    )
-
-    called: list[object] = []
-    monkeypatch.setattr(cli, "remove_originals", lambda *a, **k: called.append(1))
-
-    rc = cli.main(["send", "--config", str(config), "--remove-originals", "--yes"])
-
-    # A skipped/missing export exits 3 and must never trigger a delete.
-    assert rc == 3
-    assert called == []
-
-
-def test_send_remove_dry_run_deletes_nothing(tmp_path: Path, fake_tools, monkeypatch, capsys):
-    mount = tmp_path / "share"
-    mount.mkdir()
+def _record_a_backup(tmp_path: Path, mount: Path, fake_tools) -> Path:
     config = write_config(tmp_path, mount)
     fake_tools(
         scenario(
@@ -645,93 +595,41 @@ def test_send_remove_dry_run_deletes_nothing(tmp_path: Path, fake_tools, monkeyp
             files=["2024/01/a.heic"],
         )
     )
-
-    from photos_tool.remove import RemoveResult
-
-    calls: list[bool] = []
-
-    def fake_remove(uuids, *, dry_run=False, max_delete=500):
-        calls.append(dry_run)
-        ids = sorted(uuids)
-        return RemoveResult(requested=len(ids), deleted=0 if dry_run else len(ids), dry_run=dry_run)
-
-    monkeypatch.setattr(cli, "remove_originals", fake_remove)
-
-    rc = cli.main(
-        ["send", "--config", str(config), "--remove-originals", "--remove-dry-run", "--yes"]
-    )
-    captured = capsys.readouterr()
-
-    assert rc == 0
-    # The dry run verifies resolvability with dry_run=True and deletes nothing.
-    assert calls == [True]
-    assert "Remove dry run" in captured.out
-
-
-def test_send_records_last_backup_batch(tmp_path: Path, fake_tools):
-    mount = tmp_path / "share"
-    mount.mkdir()
-    config = write_config(tmp_path, mount)
-    files = ["2024/01/a.heic", "2024/02/b.heic"]
-    fake_tools(
-        scenario(
-            mount,
-            selected=2,
-            report=[_row_at("a", mount, files[0]), _row_at("b", mount, files[1])],
-            files=files,
-        )
-    )
-
-    assert cli.main(["send", "--config", str(config)]) == 0
-
-    data = json.loads((tmp_path / "state" / "logs" / "last-backup.json").read_text())
-    assert sorted(data["uuids"]) == ["a", "b"]
-    assert data["destination"].endswith("share")
-
-
-def _record_a_backup(tmp_path: Path, mount: Path, fake_tools, *, write: bool) -> Path:
-    config = write_config(tmp_path, mount)
-    files = ["2024/01/a.heic"]
-    fake_tools(
-        scenario(
-            mount,
-            selected=1,
-            report=[_row_at("a", mount, files[0])],
-            files=files if write else [],
-        )
-    )
     assert cli.main(["send", "--config", str(config)]) == 0
     return config
 
 
-def test_cleanup_last_json_counts_only_copies_present_on_share(tmp_path: Path, fake_tools, capsys):
+def test_cleanup_last_json_counts_copies_present_on_share(tmp_path: Path, fake_tools, capsys):
     mount = tmp_path / "share"
     mount.mkdir()
-    config = _record_a_backup(tmp_path, mount, fake_tools, write=True)
+    config = _record_a_backup(tmp_path, mount, fake_tools)
     capsys.readouterr()  # discard the send output
 
     assert cli.main(["cleanup-last", "--config", str(config), "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["count"] == 1
-    assert data["destination"].endswith("share")
+    assert data["reveal"].endswith("2024/01/a.heic")
 
 
-def test_cleanup_last_json_count_zero_when_copy_missing(tmp_path: Path, fake_tools, capsys):
+def test_cleanup_last_json_count_zero_when_copy_gone(tmp_path: Path, fake_tools, capsys):
     mount = tmp_path / "share"
     mount.mkdir()
-    config = _record_a_backup(tmp_path, mount, fake_tools, write=False)  # report path, no file
-    capsys.readouterr()  # discard the send output
+    config = _record_a_backup(tmp_path, mount, fake_tools)
+    # The recorded copy vanishes from the share before cleanup.
+    (mount / "2024" / "01" / "a.heic").unlink()
+    capsys.readouterr()
 
     assert cli.main(["cleanup-last", "--config", str(config), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["count"] == 0
 
 
-def test_cleanup_last_removes_recorded_batch(tmp_path: Path, fake_tools, monkeypatch, capsys):
+def test_cleanup_last_removes_then_clears_token(tmp_path, fake_tools, monkeypatch, capsys):
+    from photos_tool import state
     from photos_tool.remove import RemoveResult
 
     mount = tmp_path / "share"
     mount.mkdir()
-    config = _record_a_backup(tmp_path, mount, fake_tools, write=True)
+    config = _record_a_backup(tmp_path, mount, fake_tools)
 
     seen: dict[str, object] = {}
 
@@ -748,7 +646,8 @@ def test_cleanup_last_removes_recorded_batch(tmp_path: Path, fake_tools, monkeyp
     assert rc == 0
     assert seen["uuids"] == ["a"]
     assert "Moved 1 original(s) to Recently Deleted" in captured.out
-    assert (tmp_path / "state" / "logs" / "removed.jsonl").exists()
+    # The token is consumed, so the same batch can never be offered for deletion again.
+    assert state.load_backup_token(tmp_path / "state" / "logs", mount) is None
 
 
 def test_cleanup_last_without_a_recorded_backup_errors(tmp_path: Path, capsys):
@@ -757,7 +656,7 @@ def test_cleanup_last_without_a_recorded_backup_errors(tmp_path: Path, capsys):
     rc = cli.main(["cleanup-last", "--config", str(config)])
 
     assert rc == 2
-    assert "No recorded backup" in capsys.readouterr().err
+    assert "No backup recorded" in capsys.readouterr().err
 
 
 def test_doctor_runs_fake_preflight_and_dry_run(tmp_path: Path, fake_tools, capsys):

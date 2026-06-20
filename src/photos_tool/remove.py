@@ -12,12 +12,9 @@ recent macOS) so deletions land in Recently Deleted, recoverable for ~30 days.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
-
-from .reconcile import Reconciliation, Status
-from .report import ReportSummary
 
 
 class RemoveError(RuntimeError):
@@ -31,53 +28,9 @@ class RemoveResult:
     dry_run: bool
 
 
-def gate_cleanup(reconciliation: Reconciliation, report: ReportSummary) -> tuple[bool, str]:
-    """Decide whether it is safe to remove the exported originals (pure)."""
-    if not reconciliation.ok or reconciliation.status is not Status.OK:
-        return False, "the export did not reconcile cleanly (some items were skipped or missing)"
-    if report.exported_uuids is None:
-        return False, "the export report had no UUIDs, so assets cannot be matched safely"
-    if not report.exported_uuids:
-        return False, "no exported assets to remove"
-    return True, ""
-
-
 def build_local_identifiers(uuids: Iterable[str]) -> list[str]:
     """Map osxphotos UUIDs to PhotoKit local identifiers (``<uuid>/L0/001``)."""
     return [f"{uuid}/L0/001" for uuid in sorted({u for u in uuids if u})]
-
-
-def select_removable(
-    report: ReportSummary,
-    exists: Callable[[str], bool],
-) -> tuple[list[str], list[tuple[str, str]]]:
-    """Pick the UUIDs whose backup is verifiably on the share *right now* (pure).
-
-    A clean reconciliation is not enough: a re-run reports already-known assets as
-    ``skipped`` even if their copies were since deleted from the share, and two
-    assets can collide on one destination filename. So an original is only eligible
-    for deletion when every destination copy currently exists AND no copy is shared
-    with another asset. Returns ``(removable_uuids, [(uuid, reason_kept)])``.
-    """
-    paths_by_uuid = report.exported_paths or {}
-    owners: dict[str, set[str]] = {}
-    for uuid, paths in paths_by_uuid.items():
-        for path in paths:
-            owners.setdefault(path, set()).add(uuid)
-
-    removable: list[str] = []
-    kept: list[tuple[str, str]] = []
-    for uuid in sorted(report.exported_uuids or []):
-        paths = paths_by_uuid.get(uuid, ())
-        if not paths:
-            kept.append((uuid, "no destination path was recorded"))
-        elif any(len(owners.get(path, ())) > 1 for path in paths):
-            kept.append((uuid, "shares a destination filename with another photo"))
-        elif not all(exists(path) for path in paths):
-            kept.append((uuid, "its copy is not on the share"))
-        else:
-            removable.append(uuid)
-    return removable, kept
 
 
 def remove_originals(
@@ -106,6 +59,13 @@ def remove_originals(
             f"only {fetch.count()} of {len(local_ids)} exported assets resolved in Photos; "
             "aborting without deleting anything"
         )
+    # Positively verify Photos resolved exactly the assets we asked for — the count
+    # match alone could coincidentally hold if the localIdentifier convention shifted.
+    requested_uuids = {lid.split("/", 1)[0] for lid in local_ids}
+    for index in range(fetch.count()):
+        resolved = str(fetch.objectAtIndex_(index).localIdentifier()).split("/", 1)[0]
+        if resolved not in requested_uuids:
+            raise RemoveError("Photos resolved an unexpected asset; aborting without deleting")
 
     if dry_run:
         return RemoveResult(requested=len(local_ids), deleted=0, dry_run=True)
