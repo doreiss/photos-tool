@@ -125,13 +125,32 @@ def _import_photos() -> Any:  # pragma: no cover - requires macOS PhotoKit
 
 
 def _require_authorization(photos: Any) -> None:  # pragma: no cover - requires TCC grant
+    import threading
+
     level = photos.PHAccessLevelReadWrite
     status = photos.PHPhotoLibrary.authorizationStatusForAccessLevel_(level)
+
+    if status == photos.PHAuthorizationStatusNotDetermined:
+        # Actually request access — this is what shows the system prompt and registers
+        # the launching app in System Settings > Privacy & Security > Photos. Just
+        # checking the status (as before) never prompts, so the app never appears there.
+        done = threading.Event()
+        result: dict[str, int] = {}
+
+        def handler(new_status: int) -> None:
+            result["status"] = new_status
+            done.set()
+
+        photos.PHPhotoLibrary.requestAuthorizationForAccessLevel_handler_(level, handler)
+        done.wait(timeout=180)
+        status = result.get("status", status)
+
     if status != photos.PHAuthorizationStatusAuthorized:
         raise RemoveError(
-            "photos-tool is not authorized to modify the Photos library. Grant Photos access "
-            "to the app that runs photos-tool in System Settings > Privacy & Security > Photos, "
-            "then retry."
+            "photos-tool is not authorized to modify the Photos library. Approve the Photos "
+            "prompt when it appears; if it does not, enable the app that runs photos-tool under "
+            "System Settings > Privacy & Security > Photos (a packaged app shows the toggle), or "
+            "reset with: tccutil reset Photos"
         )
 
 
