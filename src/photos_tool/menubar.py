@@ -8,6 +8,7 @@ per-Mac send lock) and turns the exit code into a notification. Install with the
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -103,10 +104,9 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
                 glyph = "📷⚠️"
             self.title = glyph
             self.status.title = f"Last backup: {title}"
-            try:  # best effort — Notification Center only works from a signed .app
+            # Best effort — Notification Center only works from a signed .app bundle.
+            with contextlib.suppress(Exception):
                 rumps.notification(title, "", message)
-            except Exception:
-                pass
 
         @rumps.clicked("Send Selected Photos")
         def send_selected(self, _: rumps.MenuItem) -> None:
