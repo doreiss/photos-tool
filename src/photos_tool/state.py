@@ -118,15 +118,25 @@ def removable_assets(token: BackupToken) -> tuple[list[str], list[tuple[str, str
     """Partition the token's assets into (removable uuids, [(uuid, reason kept)]).
 
     An original is removable only if every recorded copy still exists on the share at
-    the exact recorded size — catching deleted, truncated, or replaced copies.
+    the exact recorded size — catching deleted, truncated, or replaced copies — AND no
+    recorded copy path is shared with another asset. The collision guard matters because
+    a single physical file on the share can only be the backup of ONE original; if two
+    assets recorded the same destination path, deleting both would lose the original
+    whose copy that file is not.
     """
+    owners: dict[str, set[str]] = {}
+    for asset in token.assets:
+        for path, _size in asset.files:
+            owners.setdefault(path, set()).add(asset.uuid)
+
     removable: list[str] = []
     kept: list[tuple[str, str]] = []
     for asset in token.assets:
         if not asset.files:
             kept.append((asset.uuid, "no destination copy was recorded"))
-            continue
-        if all(_matches(path, size) for path, size in asset.files):
+        elif any(len(owners.get(path, ())) > 1 for path, _size in asset.files):
+            kept.append((asset.uuid, "shares a destination filename with another photo"))
+        elif all(_matches(path, size) for path, size in asset.files):
             removable.append(asset.uuid)
         else:
             kept.append((asset.uuid, "its copy is missing or changed on the share"))

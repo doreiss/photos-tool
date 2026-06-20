@@ -2,11 +2,12 @@
 
 This is the one intentionally destructive feature, so it is fail-closed. It only
 runs after a clean reconciliation, and even then deletes an original only when its
-copy is verified to exist on the share right now (``select_removable`` — a clean
-reconcile alone is not enough, because a re-run reports already-known assets as
-"skipped" even if their copies were since deleted) and no two assets collide on one
-destination filename. It deletes exactly those UUIDs, aborts if any does not resolve
-in Photos, and uses PhotoKit (not AppleScript, which cannot delete media items on
+copy is verified to exist on the share right now at the recorded size
+(``state.removable_assets`` — a clean reconcile alone is not enough, because a re-run
+reports already-known assets as "skipped" even if their copies were since deleted) and
+no two assets collide on one destination filename. It deletes exactly those UUIDs,
+aborts if any does not resolve in Photos, and uses PhotoKit (not AppleScript, which
+cannot delete media items on
 recent macOS) so deletions land in Recently Deleted, recoverable for ~30 days.
 """
 
