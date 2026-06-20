@@ -1,4 +1,4 @@
-"""Pure logic for the menu-bar app: build the send argv and map exit codes.
+"""Pure logic for the menu-bar app: argv building, exit-code mapping, cleanup flow.
 
 Kept import-light (no rumps) so the whole decision layer is unit-tested in CI;
 ``menubar.py`` is the only untested view code. Reuses the CLI's exit-code
@@ -7,6 +7,7 @@ constants so the GUI and CLI can never drift on what an exit code means.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from .cli import (
@@ -29,16 +30,17 @@ def build_send_argv(
     executable: str,
     *,
     album: str | None = None,
-    jpeg: bool = False,
-    mp4: bool = False,
     config: str | None = None,
 ) -> list[str]:
-    """Build the ``photos-tool send`` argv for a menu action."""
+    """Build the ``photos-tool send`` argv for a menu action.
+
+    JPEG/MP4/remove are config-only (set once at init): the GUI never passes
+    ``--jpeg``/``--mp4`` so the CLI's config — the single source of truth —
+    decides. The only per-action input is which album (or selection) to send.
+    """
     argv = [executable, "send"]
     if album:
         argv += ["--album", album]
-    argv.append("--jpeg" if jpeg else "--no-jpeg")
-    argv.append("--mp4" if mp4 else "--no-mp4")
     if config:
         argv += ["--config", config]
     return argv
@@ -64,4 +66,67 @@ def map_exit_code(code: int) -> Notification:
     """Map a send exit code to a notification a non-technical user understands."""
     return _MESSAGES.get(
         code, Notification("Send failed", f"Something went wrong (code {code}). Run Diagnostics.")
+    )
+
+
+# Menu-bar title glyphs (all view strings live here, never inline in menubar.py).
+IDLE_GLYPH = "📷"  # nothing running; also the "no send yet" resting state
+WORKING_GLYPH = "📷…"  # a job is in flight
+
+
+def status_glyph(code: int | None) -> str:
+    """Menu-bar title glyph for the last send result (``None`` == launch error)."""
+    if code is None:
+        return "📷✕"
+    if code == EXIT_OK:
+        return "📷✓"
+    return "📷⚠️"
+
+
+@dataclass(frozen=True)
+class CleanupQuery:
+    """Result of ``cleanup-last --json``: how many originals are removable and a
+    Finder-revealable path that proves they really landed on the share."""
+
+    count: int
+    reveal: str
+
+
+def parse_cleanup_query(stdout: str) -> CleanupQuery:
+    """Parse ``cleanup-last --json`` stdout into a :class:`CleanupQuery`.
+
+    Tolerates empty/garbled output (returns a zero-count query) so a transient
+    CLI hiccup can never be mistaken for "there are things to delete".
+    """
+    try:
+        data = json.loads(stdout.strip() or "{}")
+    except json.JSONDecodeError:
+        return CleanupQuery(0, "")
+    if not isinstance(data, dict):
+        return CleanupQuery(0, "")
+    try:
+        count = int(data.get("count", 0))
+    except (TypeError, ValueError):
+        count = 0
+    reveal = data.get("reveal", "")
+    return CleanupQuery(max(count, 0), str(reveal) if reveal else "")
+
+
+def confirm_reveal_message(count: int) -> Notification:
+    """First cleanup prompt: confirm the originals are on the share before any
+    deletion. ``Show me`` reveals the real file in Finder; ``Cancel`` aborts."""
+    return Notification(
+        "Confirm your photos arrived",
+        f"{count} photo(s) are confirmed on the share. Show them in Finder so you can "
+        "check they really arrived?",
+    )
+
+
+def confirm_delete_message(count: int) -> Notification:
+    """Second cleanup prompt, shown only after the user has seen the files: the
+    actual, recoverable deletion. ``Keep`` aborts; only the move runs the CLI."""
+    return Notification(
+        "Did they all arrive?",
+        f"Move {count} backed-up original(s) to Recently Deleted? "
+        "They stay recoverable for 30 days.",
     )
