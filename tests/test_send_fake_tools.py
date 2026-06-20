@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -665,6 +666,98 @@ def test_send_remove_dry_run_deletes_nothing(tmp_path: Path, fake_tools, monkeyp
     # The dry run verifies resolvability with dry_run=True and deletes nothing.
     assert calls == [True]
     assert "Remove dry run" in captured.out
+
+
+def test_send_records_last_backup_batch(tmp_path: Path, fake_tools):
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)
+    files = ["2024/01/a.heic", "2024/02/b.heic"]
+    fake_tools(
+        scenario(
+            mount,
+            selected=2,
+            report=[_row_at("a", mount, files[0]), _row_at("b", mount, files[1])],
+            files=files,
+        )
+    )
+
+    assert cli.main(["send", "--config", str(config)]) == 0
+
+    data = json.loads((tmp_path / "state" / "logs" / "last-backup.json").read_text())
+    assert sorted(data["uuids"]) == ["a", "b"]
+    assert data["destination"].endswith("share")
+
+
+def _record_a_backup(tmp_path: Path, mount: Path, fake_tools, *, write: bool) -> Path:
+    config = write_config(tmp_path, mount)
+    files = ["2024/01/a.heic"]
+    fake_tools(
+        scenario(
+            mount,
+            selected=1,
+            report=[_row_at("a", mount, files[0])],
+            files=files if write else [],
+        )
+    )
+    assert cli.main(["send", "--config", str(config)]) == 0
+    return config
+
+
+def test_cleanup_last_json_counts_only_copies_present_on_share(tmp_path: Path, fake_tools, capsys):
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = _record_a_backup(tmp_path, mount, fake_tools, write=True)
+    capsys.readouterr()  # discard the send output
+
+    assert cli.main(["cleanup-last", "--config", str(config), "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["count"] == 1
+    assert data["destination"].endswith("share")
+
+
+def test_cleanup_last_json_count_zero_when_copy_missing(tmp_path: Path, fake_tools, capsys):
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = _record_a_backup(tmp_path, mount, fake_tools, write=False)  # report path, no file
+    capsys.readouterr()  # discard the send output
+
+    assert cli.main(["cleanup-last", "--config", str(config), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["count"] == 0
+
+
+def test_cleanup_last_removes_recorded_batch(tmp_path: Path, fake_tools, monkeypatch, capsys):
+    from photos_tool.remove import RemoveResult
+
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = _record_a_backup(tmp_path, mount, fake_tools, write=True)
+
+    seen: dict[str, object] = {}
+
+    def fake_remove(uuids, *, dry_run=False, max_delete=500):
+        ids = sorted(uuids)
+        seen["uuids"] = ids
+        return RemoveResult(requested=len(ids), deleted=len(ids), dry_run=dry_run)
+
+    monkeypatch.setattr(cli, "remove_originals", fake_remove)
+
+    rc = cli.main(["cleanup-last", "--config", str(config), "--yes"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert seen["uuids"] == ["a"]
+    assert "Moved 1 original(s) to Recently Deleted" in captured.out
+    assert (tmp_path / "state" / "logs" / "removed.jsonl").exists()
+
+
+def test_cleanup_last_without_a_recorded_backup_errors(tmp_path: Path, capsys):
+    config = write_config(tmp_path, tmp_path / "share")
+
+    rc = cli.main(["cleanup-last", "--config", str(config)])
+
+    assert rc == 2
+    assert "No recorded backup" in capsys.readouterr().err
 
 
 def test_doctor_runs_fake_preflight_and_dry_run(tmp_path: Path, fake_tools, capsys):

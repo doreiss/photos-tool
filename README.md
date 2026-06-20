@@ -81,16 +81,27 @@ Then `photos-tool doctor` should be all green.
   macOS Shortcut and bind a key. The notification maps the exit code to plain English.
 - **Terminal:** `photos-tool send` (add `--jpeg --mp4` for the Windows-friendly mirror).
 
-### Free space on the Mac after a backup (opt-in)
+### Free space on the Mac after a backup (opt-in, recoverable)
+
+Designed for "get photos off my Mac, but only once I'm sure they arrived." Backup and
+delete are **decoupled** — send first, optionally verify the copies on the share (or on
+Windows), then delete that batch's originals:
 
 ```bash
-photos-tool send --remove-originals --remove-dry-run   # preview: what would be removed
-photos-tool send --remove-originals                    # move exported originals to Recently Deleted
+photos-tool send --album "Trip"        # 1. back up a batch (records it)
+# 2. (optional) open the share / Windows and check the photos really arrived
+photos-tool cleanup-last --dry-run     # 3a. preview what would be removed
+photos-tool cleanup-last               # 3b. move that batch's originals to Recently Deleted
 ```
 
-This only runs after a clean reconciliation, removes exactly the photos confirmed on
-the share, aborts if any don't resolve, and sends them to **Recently Deleted
-(recoverable ~30 days)** via PhotoKit. It needs a one-time **Photos** permission grant.
+In the **menu-bar app**: turn on *"Offer cleanup after each backup"* to get a popup
+after every ✓ (**Reveal on share… / Move to Recently Deleted / Not now**), or use
+*"Clean up last backup…"* anytime. One-shot `send --remove-originals` also exists.
+
+Either way it only acts on a clean backup, deletes **exactly** the batch's photos and
+**only those re-verified present and non-empty on the share**, aborts if any don't
+resolve, and moves them to **Recently Deleted (recoverable ~30 days)** via PhotoKit
+(one-time **Photos** permission grant; macOS shows its own "Delete N?" confirmation).
 
 ## What CI proves (and what it can't)
 

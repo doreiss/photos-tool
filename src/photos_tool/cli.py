@@ -327,6 +327,11 @@ def _cmd_send(args: argparse.Namespace) -> int:
             exiftool_warning=report.exiftool_warning,
         )
 
+        # Record this batch so "cleanup-last" / the GUI can offer to remove exactly
+        # these originals later, after the user has verified they arrived.
+        if exit_code == EXIT_OK and report.exported_uuids:
+            _write_last_backup(log_dir, destination, report)
+
         if _override(args.remove_originals, config.remove.enabled) and exit_code == EXIT_OK:
             _maybe_remove_originals(report, reconciliation, config, args, log_dir)
 
@@ -537,6 +542,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.add_argument("--last-report", action="store_true", help="print the last run summary")
     p_send.set_defaults(func=_cmd_send)
 
+    p_cleanup = sub.add_parser(
+        "cleanup-last",
+        help="move the last backup's originals to Recently Deleted (re-verified on the share)",
+    )
+    p_cleanup.add_argument("--config", help="config TOML path")
+    p_cleanup.add_argument(
+        "--dry-run", action="store_true", help="report what would be removed; delete nothing"
+    )
+    p_cleanup.add_argument("--yes", action="store_true", help="skip the interactive confirmation")
+    p_cleanup.add_argument(
+        "--json", action="store_true", help="print {count, destination} for the GUI and exit"
+    )
+    p_cleanup.set_defaults(func=_cmd_cleanup_last)
+
     p_doctor = sub.add_parser("doctor", help="diagnose tools, permissions, share, and iCloud risk")
     p_doctor.add_argument("destination", nargs="?", help="destination override")
     p_doctor.add_argument("--config", help="config TOML path")
@@ -688,9 +707,10 @@ def _maybe_remove_originals(
         print(f"Not removing originals: {reason}.", file=sys.stderr)
         return
     # A clean reconciliation is not enough — only remove originals whose copy is
-    # verifiably on the share right now (a re-run reports already-known assets as
-    # "skipped" even if their copies were since deleted).
-    uuids, kept = select_removable(report, lambda path: Path(path).exists())
+    # verifiably present AND non-empty on the share right now (a re-run reports
+    # already-known assets as "skipped" even if their copies were since deleted,
+    # and a 0-byte file means a truncated/failed copy).
+    uuids, kept = select_removable(report, _present_and_nonempty)
     if kept:
         print(
             f"Keeping {len(kept)} original(s) in Photos — their copy is missing from the share "
@@ -757,6 +777,125 @@ def _log_removed(log_dir: Path, uuids: Sequence[str]) -> None:
             f"Warning: removed originals but could not write the audit log: {exc}",
             file=sys.stderr,
         )
+
+
+def _present_and_nonempty(path: str) -> bool:
+    """A backup copy counts as 'arrived' only if it exists and is not a 0-byte stub."""
+    try:
+        candidate = Path(path)
+        return candidate.is_file() and candidate.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _write_last_backup(log_dir: Path, destination: Path, report: ReportSummary) -> None:
+    data = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "destination": str(destination),
+        "uuids": sorted(report.exported_uuids or []),
+        "paths": {uuid: list(paths) for uuid, paths in (report.exported_paths or {}).items()},
+    }
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "last-backup.json").write_text(
+            json.dumps(data, sort_keys=True), encoding="utf-8"
+        )
+    except OSError:
+        pass  # purely a convenience record for cleanup-last; never fail the backup over it
+
+
+def _read_last_backup(log_dir: Path) -> dict | None:
+    try:
+        raw = json.loads((log_dir / "last-backup.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _last_backup_report(data: dict) -> ReportSummary:
+    uuids = [str(u) for u in data.get("uuids") or []]
+    paths = {
+        str(uuid): tuple(str(p) for p in plist) for uuid, plist in (data.get("paths") or {}).items()
+    }
+    return ReportSummary(
+        total_files=len(uuids),
+        exported=len(uuids),
+        new=0,
+        updated=0,
+        skipped=0,
+        converted=0,
+        missing=0,
+        error=0,
+        exported_uuids=frozenset(uuids),
+        exported_paths=paths,
+    )
+
+
+def _cmd_cleanup_last(args: argparse.Namespace) -> int:
+    try:
+        config = load_config(args.config)
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    log_dir = Path(config.state.log_dir).expanduser()
+    data = _read_last_backup(log_dir)
+    if not data or not data.get("uuids"):
+        print("No recorded backup to clean up. Run a backup first.", file=sys.stderr)
+        return EXIT_USAGE
+
+    report = _last_backup_report(data)
+    removable, kept = select_removable(report, _present_and_nonempty)
+
+    if args.json:
+        print(json.dumps({"count": len(removable), "destination": data.get("destination", "")}))
+        return EXIT_OK
+
+    if kept:
+        print(
+            f"Skipping {len(kept)} original(s) from the last backup — their copy is missing or "
+            "empty on the share.",
+            file=sys.stderr,
+        )
+    if not removable:
+        print("No backed-up originals are confirmed on the share; nothing to remove.")
+        return EXIT_OK
+
+    if args.dry_run:
+        try:
+            result = remove_originals(removable, dry_run=True, max_delete=config.remove.max_delete)
+        except RemoveError as exc:
+            print(f"Dry run could not verify originals in Photos: {exc}", file=sys.stderr)
+            return EXIT_PREFLIGHT
+        print(
+            f"Would move {result.requested} original(s) from your last backup to Recently Deleted "
+            "(recoverable ~30 days). Nothing was deleted."
+        )
+        return EXIT_OK
+
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("Refusing to remove without confirmation; pass --yes.", file=sys.stderr)
+            return EXIT_USAGE
+        answer = (
+            input(
+                f"Move {len(removable)} backed-up originals to Recently Deleted "
+                "(recoverable ~30 days)? [y/N] "
+            )
+            .strip()
+            .lower()
+        )
+        if answer not in {"y", "yes"}:
+            print("Left originals in Photos.")
+            return EXIT_OK
+
+    try:
+        result = remove_originals(removable, dry_run=False, max_delete=config.remove.max_delete)
+    except RemoveError as exc:
+        print(f"Could not remove originals: {exc}", file=sys.stderr)
+        return EXIT_PREFLIGHT
+    print(f"Moved {result.deleted} original(s) to Recently Deleted (recoverable ~30 days).")
+    _log_removed(log_dir, removable)
+    return EXIT_OK
 
 
 def _export_options(
