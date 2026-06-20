@@ -38,7 +38,7 @@ iPhones can't collide on names like `IMG_0001`:
 <share>/<this-mac>/compat/2024/09/VID_0003.mp4    #   (point Windows Explorer here)
 ```
 
-The optional `compat/` tree (`--jpeg`/`--mp4`) is a fully Windows-openable mirror —
+The optional `compat/` tree (enable JPEG/MP4 copies in config) is a fully Windows-openable mirror —
 JPEG for every still, H.264 MP4 for every standalone video, no HEVC `.mov` — so a
 Windows PC with no codecs can browse `compat/` while the main tree stays original.
 
@@ -46,7 +46,7 @@ Windows PC with no codecs can browse `compat/` while the main tree stays origina
 
 ```bash
 brew install exiftool          # required (metadata); add ffmpeg for MP4 copies:
-brew install ffmpeg            # optional, only if you want --mp4
+brew install ffmpeg            # optional, only for MP4 video copies
 
 uv tool install photos-tool                 # recommended (or: pipx install photos-tool)
 uv tool install 'photos-tool[gui]'          # ...with the 📷 menu-bar app
@@ -76,10 +76,11 @@ Then `photos-tool doctor` should be all green.
 ## Send
 
 - **Menu bar (easiest):** run `photos-tool-menubar`, select photos in Photos, click
-  📷 → **Send Selected Photos**. A notification tells you the result.
+  📷 → **Send Selected Photos**. The 📷 icon and the "Last backup" line show the result
+  (it stays responsive while exporting; a second click is ignored until the first finishes).
 - **Hotkey:** `photos-tool install-shortcut` writes a launcher; put it in a one-action
   macOS Shortcut and bind a key. The notification maps the exit code to plain English.
-- **Terminal:** `photos-tool send` (add `--jpeg --mp4` for the Windows-friendly mirror).
+- **Terminal:** `photos-tool send` (JPEG/MP4 copies are config settings, set once at init).
 
 ### Free space on the Mac after a backup (opt-in, recoverable)
 
@@ -94,9 +95,11 @@ photos-tool cleanup-last --dry-run     # 3a. preview what would be removed
 photos-tool cleanup-last               # 3b. move that batch's originals to Recently Deleted
 ```
 
-In the **menu-bar app**: turn on *"Offer cleanup after each backup"* to get a popup
-after every ✓ (**Reveal on share… / Move to Recently Deleted / Not now**), or use
-*"Clean up last backup…"* anytime. One-shot `send --remove-originals` also exists.
+In the **menu-bar app**: use *"Clean up last backup…"* anytime. It first reveals a
+real backed-up file in Finder so you can confirm the photos arrived, then offers to
+move that batch's originals to Recently Deleted — a deliberate, separate step from the
+backup, never automatic. JPEG/MP4 copies and removal are config-only (set once at
+init in the TOML), so the menu exposes no per-run toggles.
 
 Either way it only acts on a clean backup, deletes **exactly** the batch's photos and
 **only those re-verified present and non-empty on the share**, aborts if any don't
