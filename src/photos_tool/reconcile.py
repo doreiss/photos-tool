@@ -25,8 +25,11 @@ class Reconciliation:
     exported: int
     missing: int
     status: Status
-    ok: bool
     message: str
+
+    @property
+    def ok(self) -> bool:
+        return self.status in {Status.OK, Status.OVER}
 
 
 def reconcile(selected: int, exported: int, missing: int = 0) -> Reconciliation:
@@ -45,7 +48,6 @@ def reconcile(selected: int, exported: int, missing: int = 0) -> Reconciliation:
             exported,
             missing,
             Status.EMPTY,
-            ok=False,
             message="Nothing was selected — select photos in Photos before sending.",
         )
 
@@ -56,7 +58,6 @@ def reconcile(selected: int, exported: int, missing: int = 0) -> Reconciliation:
             exported,
             missing,
             Status.SKIPPED,
-            ok=False,
             message=(
                 f"{gap} of {selected} selected item(s) were not exported. "
                 "This usually means iCloud 'Optimize Mac Storage' placeholders — turn on "
@@ -70,7 +71,6 @@ def reconcile(selected: int, exported: int, missing: int = 0) -> Reconciliation:
             exported,
             missing,
             Status.OVER,
-            ok=True,
             message=(
                 f"Exported {exported} files from {selected} selected item(s); the extras are "
                 "Live Photo motion or edited renditions."
@@ -82,6 +82,5 @@ def reconcile(selected: int, exported: int, missing: int = 0) -> Reconciliation:
         exported,
         missing,
         Status.OK,
-        ok=True,
         message=f"All {selected} selected item(s) exported.",
     )

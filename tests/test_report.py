@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from photos_tool.reconcile import Status
 from photos_tool.report import (
+    ReportError,
     ReportSummary,
     missing_expected_columns,
     parse_report,
@@ -41,7 +44,9 @@ def test_missing_json_report_flags_icloud_skip():
     assert "Optimize Mac Storage" in reconciliation.message
 
 
-def test_csv_report_falls_back_to_missing_counts():
+def test_uuidless_report_refuses_to_reconcile():
+    # A report with no uuid column cannot be safely reconciled; we fail loudly rather
+    # than fall back to a looser count-based model that could mask silent loss.
     report = parse_report(FIXTURES / "report.csv")
 
     assert report.total_files == 2
@@ -49,8 +54,8 @@ def test_csv_report_falls_back_to_missing_counts():
     assert report.skipped == 1
     assert report.exported_uuids is None
 
-    reconciliation = summarize(report, selected_assets=2)
-    assert reconciliation.ok
+    with pytest.raises(ReportError, match="cannot safely reconcile"):
+        summarize(report, selected_assets=2)
 
 
 def test_exiftool_error_does_not_count_as_asset_loss(tmp_path: Path):
@@ -82,7 +87,7 @@ def test_exiftool_error_does_not_count_as_asset_loss(tmp_path: Path):
     assert reconciliation.ok
 
 
-def test_csv_fallback_does_not_false_ok_when_nothing_accounted(tmp_path: Path):
+def test_uuidless_report_with_unaccounted_rows_still_refuses(tmp_path: Path):
     path = tmp_path / "report.csv"
     path.write_text(
         "filename,exported,skipped,missing,error\n"
@@ -91,10 +96,9 @@ def test_csv_fallback_does_not_false_ok_when_nothing_accounted(tmp_path: Path):
     )
 
     report = parse_report(path)
-    reconciliation = summarize(report, selected_assets=1)
 
-    assert not reconciliation.ok
-    assert reconciliation.status is Status.SKIPPED
+    with pytest.raises(ReportError, match="cannot safely reconcile"):
+        summarize(report, selected_assets=1)
 
 
 def test_string_zero_float_is_false(tmp_path: Path):

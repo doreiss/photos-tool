@@ -95,7 +95,7 @@ def osxphotos_exports(log: list[dict[str, Any]]) -> list[list[str]]:
     ]
 
 
-def test_send_success_persists_local_report_and_exportdb(tmp_path: Path, fake_tools, capsys):
+def test_send_success_persists_last_run_and_exportdb(tmp_path: Path, fake_tools, capsys):
     mount = tmp_path / "share"
     mount.mkdir()
     config = write_config(tmp_path, mount)
@@ -114,8 +114,10 @@ def test_send_success_persists_local_report_and_exportdb(tmp_path: Path, fake_to
     exportdb_path = Path(argv[argv.index("--exportdb") + 1])
     assert not report_path.is_relative_to(mount)
     assert not exportdb_path.is_relative_to(mount)
-    assert list((tmp_path / "state" / "logs").glob("*-original-report.json"))
-    assert (tmp_path / "state" / "logs" / "runs.jsonl").exists()
+    # No timestamped report copies are written anymore (they were write-only and leaked
+    # GPS/paths); the single last-run.json is the only persisted run state.
+    assert not list((tmp_path / "state" / "logs").glob("*-report.json"))
+    assert (tmp_path / "state" / "logs" / "last-run.json").exists()
 
 
 def test_send_album_uses_album_scope_not_selected(tmp_path: Path, fake_tools):
@@ -171,15 +173,16 @@ def test_send_last_report_prints_last_run_summary(tmp_path: Path, fake_tools, ca
     assert rc == 0
     assert '"selected": 1' in captured.out
     assert '"exit_code": 0' in captured.out
+    assert '"status":' in captured.out
 
 
-def test_send_last_report_handles_corrupt_last_line(tmp_path: Path, capsys):
+def test_send_last_report_handles_corrupt_record(tmp_path: Path, capsys):
     mount = tmp_path / "share"
     mount.mkdir()
     config = write_config(tmp_path, mount)
     log_dir = tmp_path / "state" / "logs"
     log_dir.mkdir(parents=True)
-    (log_dir / "runs.jsonl").write_text('{"ok": true}\n{not-json\n', encoding="utf-8")
+    (log_dir / "last-run.json").write_text("{not-json", encoding="utf-8")
 
     rc = cli.main(["send", "--config", str(config), "--last-report"])
     captured = capsys.readouterr()
@@ -246,7 +249,7 @@ def test_send_report_parse_failure_writes_run_log(tmp_path: Path, fake_tools, ca
 
     assert rc == 1
     assert "report error" in captured.err
-    assert (tmp_path / "state" / "logs" / "runs.jsonl").exists()
+    assert (tmp_path / "state" / "logs" / "last-run.json").exists()
 
 
 def test_send_noop_dedup_report_is_success(tmp_path: Path, fake_tools, capsys):
@@ -659,6 +662,34 @@ def test_cleanup_last_without_a_recorded_backup_errors(tmp_path: Path, capsys):
     assert "No backup recorded" in capsys.readouterr().err
 
 
+def test_send_rejects_a_report_without_uuids_without_crashing(tmp_path: Path, fake_tools, capsys):
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)
+    no_uuid = [
+        {"filename": str(mount / "x.heic"), "exported": True, "missing": False, "error": False}
+    ]
+    fake_tools(scenario(mount, selected=1, report=no_uuid, files=[]))
+
+    rc = cli.main(["send", "--config", str(config)])
+
+    assert rc == 1
+    assert "report error" in capsys.readouterr().err
+
+
+def test_send_dry_run_rejects_a_report_without_uuids(tmp_path: Path, fake_tools, capsys):
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)
+    no_uuid = [{"filename": "/x", "exported": True, "missing": False, "error": False}]
+    fake_tools(scenario(mount, selected=1, dry_report=no_uuid))
+
+    rc = cli.main(["send", "--config", str(config), "--dry-run"])
+
+    assert rc == 1
+    assert "report error" in capsys.readouterr().err
+
+
 def test_doctor_runs_fake_preflight_and_dry_run(tmp_path: Path, fake_tools, capsys):
     mount = tmp_path / "share"
     mount.mkdir()
@@ -705,8 +736,8 @@ def test_send_surfaces_exiftool_errors_without_failing(tmp_path: Path, fake_tool
 
     assert rc == 0
     assert "metadata embedding reported" in captured.err
-    log_line = (tmp_path / "state" / "logs" / "runs.jsonl").read_text(encoding="utf-8")
-    assert '"exiftool_error": 1' in log_line
+    record = (tmp_path / "state" / "logs" / "last-run.json").read_text(encoding="utf-8")
+    assert '"exiftool_error": 1' in record
 
 
 def test_send_rejects_concurrent_run_for_same_destination(tmp_path: Path, fake_tools, capsys):

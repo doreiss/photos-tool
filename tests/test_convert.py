@@ -76,10 +76,8 @@ def test_convert_videos_skips_live_motion_and_current_outputs(tmp_path: Path, mo
 
     summary = convert.convert_videos(root, compat, crf=22)
 
-    assert summary.scanned == 4
-    assert summary.skipped_live == 1
-    assert summary.skipped_existing == 1
-    assert summary.skipped_non_hevc == 1
+    # live motion + already-current + non-HEVC all fold into one skipped count.
+    assert summary.skipped == 3
     assert summary.transcoded == 1
     assert transcoded == [standalone]
 
@@ -104,31 +102,27 @@ def test_convert_videos_excludes_compat_tree(tmp_path: Path, monkeypatch):
 
     summary = convert.convert_videos(tmp_path, tmp_path / "compat")
 
-    assert summary.scanned == 1
+    assert summary.transcoded == 1
     assert transcoded == [archive_video]
 
 
-def test_convert_videos_caches_non_hevc_probe(tmp_path: Path, monkeypatch):
+def test_convert_videos_skips_non_hevc_without_a_cache(tmp_path: Path, monkeypatch):
+    # No on-disk cache anymore: _is_output_current keeps repeat runs idempotent, and a
+    # non-HEVC source is simply skipped each pass (transcodes nothing either way).
     root = tmp_path / "archive"
     root.mkdir()
     video = root / "VID_0001.MOV"
-    cache = tmp_path / "cache.json"
     video.write_text("video", encoding="utf-8")
-    probes = 0
 
-    def fake_codec(_path: Path) -> str:
-        nonlocal probes
-        probes += 1
-        return "h264"
+    monkeypatch.setattr(convert, "probe_video_codec", lambda _path: "h264")
 
-    monkeypatch.setattr(convert, "probe_video_codec", fake_codec)
+    first = convert.convert_videos(root, root / "compat")
+    second = convert.convert_videos(root, root / "compat")
 
-    first = convert.convert_videos(root, root / "compat", cache_path=cache)
-    second = convert.convert_videos(root, root / "compat", cache_path=cache)
-
-    assert first.skipped_non_hevc == 1
-    assert second.skipped_non_hevc == 1
-    assert probes == 1
+    assert first.skipped == 1
+    assert first.transcoded == 0
+    assert second.skipped == 1
+    assert second.transcoded == 0
 
 
 def test_find_video_candidates_maps_walk_oserror(tmp_path: Path, monkeypatch):

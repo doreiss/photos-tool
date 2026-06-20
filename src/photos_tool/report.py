@@ -94,15 +94,22 @@ class ReportSummary:
     error: int
     exiftool_error: int = 0
     exiftool_warning: int = 0
-    exported_uuids: frozenset[str] | None = None
-    # uuid -> the destination path(s) osxphotos reported for it. Load-bearing for the
-    # cleanup feature, which must confirm a copy is actually on the share before deleting.
+    # uuid -> the destination path(s) osxphotos reported for it. Every non-missing/
+    # non-error uuid is a key (even with an empty path tuple). ``None`` only when the
+    # report had no uuid column at all. Load-bearing for the cleanup feature, which
+    # must confirm a copy is actually on the share before deleting.
     exported_paths: dict[str, tuple[str, ...]] | None = None
     columns: frozenset[str] = frozenset()
 
     @property
     def issue_count(self) -> int:
         return self.missing + self.error
+
+    @property
+    def exported_uuids(self) -> frozenset[str] | None:
+        if self.exported_paths is None:
+            return None
+        return frozenset(self.exported_paths)
 
 
 def parse_report(path: Path) -> ReportSummary:
@@ -141,7 +148,6 @@ def sanitize_report(source: Path, target: Path) -> None:
 def summarize_rows(rows: Iterable[dict[str, Any]]) -> ReportSummary:
     row_list = list(rows)
     columns: set[str] = set()
-    exported_uuids: set[str] = set()
     exported_paths: dict[str, list[str]] = {}
     uuid_present = False
     exported = new = updated = skipped = converted = missing = error = 0
@@ -166,10 +172,10 @@ def summarize_rows(rows: Iterable[dict[str, Any]]) -> ReportSummary:
             uuid_present = True
             if not row_missing and not row_error:
                 key = str(uuid)
-                exported_uuids.add(key)
+                paths = exported_paths.setdefault(key, [])
                 filename = row.get("filename")
                 if filename not in (None, ""):
-                    exported_paths.setdefault(key, []).append(str(filename))
+                    paths.append(str(filename))
 
     return ReportSummary(
         total_files=len(row_list),
@@ -182,7 +188,6 @@ def summarize_rows(rows: Iterable[dict[str, Any]]) -> ReportSummary:
         error=error,
         exiftool_error=exiftool_error,
         exiftool_warning=exiftool_warning,
-        exported_uuids=frozenset(exported_uuids) if uuid_present else None,
         exported_paths=(
             {uuid: tuple(paths) for uuid, paths in exported_paths.items()} if uuid_present else None
         ),
@@ -191,11 +196,10 @@ def summarize_rows(rows: Iterable[dict[str, Any]]) -> ReportSummary:
 
 
 def summarize(report: ReportSummary, selected_assets: int) -> Reconciliation:
+    if report.exported_uuids is None:
+        raise ReportError("report too old/malformed; cannot safely reconcile (no uuid column).")
     missing = report.missing + report.error
-    if report.exported_uuids is not None:
-        exported = len(report.exported_uuids)
-    else:
-        exported = min(selected_assets, report.exported + report.skipped)
+    exported = len(report.exported_uuids)
     return reconcile(selected=selected_assets, exported=exported, missing=missing)
 
 

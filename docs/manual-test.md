@@ -64,11 +64,13 @@ Create a small album with about 10 items:
 
 ## Capturing the authoritative report fixture
 
-After a successful real run, sanitize one persisted report before committing it:
+photos-tool no longer leaves report copies on disk (they were write-only and leaked
+GPS/paths). To refresh the fixture, run osxphotos directly to a throwaway report,
+then sanitize it before committing:
 
 ```bash
-latest_report=$(ls -t ~/.local/state/photos-tool/logs/*-original-report.json | head -n 1)
-photos-tool sanitize-report "$latest_report" tests/fixtures/report_real_sanitized.json
+osxphotos export /tmp/ptt-fixture --selected --report /tmp/ptt-report.json
+photos-tool sanitize-report /tmp/ptt-report.json tests/fixtures/report_real_sanitized.json
 ```
 
 Inspect the sanitized file before committing it. The sanitizer hashes filenames,

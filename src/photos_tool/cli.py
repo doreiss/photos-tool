@@ -222,6 +222,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
 
         try:
             report = parse_report(original_report)
+            reconciliation = summarize(report, selected)
         except ReportError as exc:
             print(f"report error: {exc}", file=sys.stderr)
             _write_run_log(
@@ -236,8 +237,6 @@ def _cmd_send(args: argparse.Namespace) -> int:
             )
             return EXIT_PREFLIGHT
 
-        _persist_report(original_report, log_dir, "original")
-        reconciliation = summarize(report, selected)
         _print_summary(destination, selected, report, reconciliation.message)
         _warn_report_shape(report)
 
@@ -252,7 +251,6 @@ def _cmd_send(args: argparse.Namespace) -> int:
                     album=album,
                     use_photokit=use_photokit,
                     report_dir=tmpdir,
-                    log_dir=log_dir,
                     verbose=args.verbose,
                 )
             except (OsxphotosError, ReportError) as exc:
@@ -286,13 +284,12 @@ def _cmd_send(args: argparse.Namespace) -> int:
                     destination,
                     destination / "compat",
                     crf=config.copies.mp4_crf,
-                    cache_path=log_dir / "video-codec-cache.json",
                 )
                 print(
                     "MP4 copies into compat/: "
                     f"{convert_summary.transcoded} transcoded, "
-                    f"{convert_summary.skipped_live} Live Photo motion skipped, "
-                    f"{convert_summary.skipped_existing} already current."
+                    f"{convert_summary.skipped} skipped (Live Photo motion, "
+                    "already current, or non-HEVC)."
                 )
             except ConversionError as exc:
                 print(f"conversion error: {exc}", file=sys.stderr)
@@ -795,10 +792,10 @@ def _send_dry_run(opts: ExportOptions, selected: int) -> int:
             return EXIT_PREFLIGHT
         try:
             report = parse_report(report_path)
+            reconciliation = summarize(report, selected)
         except ReportError as exc:
             print(f"report error: {exc}", file=sys.stderr)
             return EXIT_PREFLIGHT
-        reconciliation = summarize(report, selected)
         _print_summary(
             Path(opts.destination),
             selected,
@@ -825,7 +822,6 @@ def _run_jpeg_pass(
     album: str | None,
     use_photokit: bool,
     report_dir: Path,
-    log_dir: Path,
     verbose: bool,
 ) -> ReportSummary:
     compat_destination = destination / "compat"
@@ -845,7 +841,6 @@ def _run_jpeg_pass(
     if not result.ok:
         raise OsxphotosError(f"JPEG compatibility export failed with exit {result.returncode}")
     report = parse_report(report_path)
-    _persist_report(report_path, log_dir, "jpeg")
     print(f"JPEG compatibility copies: {report.converted} converted into {compat_destination}")
     _warn_report_shape(report)
     return report
@@ -894,18 +889,20 @@ def _warn_report_shape(report: ReportSummary) -> None:
             + ", ".join(sorted(missing)),
             file=sys.stderr,
         )
-    if report.exported_uuids is None:
-        print(
-            "Warning: osxphotos report had no uuid column; "
-            "reconciliation used missing/error counts.",
-            file=sys.stderr,
-        )
 
 
-def _persist_report(source: Path, log_dir: Path, kind: str) -> Path:
-    target = log_dir / f"{_timestamp()}-{kind}-report{source.suffix}"
-    shutil.copy2(source, target)
-    return target
+def _status_message(exit_code: int) -> str:
+    return {
+        EXIT_OK: "All selected photos sent.",
+        EXIT_PREFLIGHT: "Send failed before exporting; run photos-tool doctor.",
+        EXIT_RECONCILE: "Some photos were skipped (often iCloud cloud-only originals).",
+        EXIT_NOTHING_SELECTED: "Nothing was selected.",
+        EXIT_CONVERSION: "Photos sent, but a compatibility (JPEG/MP4) copy failed.",
+    }.get(exit_code, f"Send ended with code {exit_code}.")
+
+
+def _last_run_path(log_dir: Path) -> Path:
+    return log_dir / "last-run.json"
 
 
 def _write_run_log(
@@ -923,8 +920,8 @@ def _write_run_log(
     exiftool_error: int = 0,
     exiftool_warning: int = 0,
 ) -> None:
-    log_dir.mkdir(parents=True, exist_ok=True)
     row = {
+        "status": _status_message(exit_code),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "scope": scope,
         "selected": selected,
@@ -938,24 +935,21 @@ def _write_run_log(
         "duration_seconds": round(time.monotonic() - started, 3),
         "exit_code": exit_code,
     }
-    with (log_dir / "runs.jsonl").open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, sort_keys=True) + "\n")
+    # One atomically-replaced record, not a growing log — the GUI only reads the last run.
+    state.atomic_write_json(_last_run_path(log_dir), row)
 
 
 def _print_last_report(config: Config) -> int:
-    path = Path(config.state.log_dir).expanduser() / "runs.jsonl"
+    path = _last_run_path(Path(config.state.log_dir).expanduser())
     try:
-        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        text = path.read_text(encoding="utf-8")
     except OSError:
-        print(f"No run log found at {path}", file=sys.stderr)
-        return EXIT_PREFLIGHT
-    if not lines:
-        print(f"No runs recorded in {path}", file=sys.stderr)
+        print(f"No run recorded at {path}", file=sys.stderr)
         return EXIT_PREFLIGHT
     try:
-        row = json.loads(lines[-1])
+        row = json.loads(text)
     except json.JSONDecodeError as exc:
-        print(f"Last run log entry in {path} is corrupt: {exc}", file=sys.stderr)
+        print(f"Last run record in {path} is corrupt: {exc}", file=sys.stderr)
         return EXIT_PREFLIGHT
     print(json.dumps(row, indent=2, sort_keys=True))
     return EXIT_OK
@@ -1040,10 +1034,6 @@ def _photos_tool_executable() -> str:
     if argv0.is_absolute():
         return str(argv0)
     return "photos-tool"
-
-
-def _timestamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 if __name__ == "__main__":

@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 VIDEO_SUFFIXES = {".mov", ".m4v"}
 STILL_SUFFIXES = {".heic", ".heif", ".jpg", ".jpeg"}
@@ -20,11 +18,8 @@ class ConversionError(RuntimeError):
 
 @dataclass(frozen=True)
 class ConvertSummary:
-    scanned: int = 0
     transcoded: int = 0
-    skipped_live: int = 0
-    skipped_existing: int = 0
-    skipped_non_hevc: int = 0
+    skipped: int = 0
 
 
 def find_video_candidates(root: Path, exclude_dirs: tuple[str, ...] = ("compat",)) -> list[Path]:
@@ -61,43 +56,28 @@ def convert_videos(
     root: Path,
     compat_root: Path,
     crf: int = 20,
-    cache_path: Path | None = None,
 ) -> ConvertSummary:
     """Transcode standalone HEVC videos in ``root`` to H.264 MP4s under ``compat_root``.
 
     The originals tree stays pristine; the Windows-friendly ``.mp4`` mirror lands in
     ``compat_root`` at the same relative path. Live Photo motion clips are skipped.
+    ``_is_output_current`` keeps repeat runs idempotent without any on-disk cache.
     """
     summary = ConvertSummary()
-    cache = _load_cache(cache_path)
-    cache_changed = False
     for video in find_video_candidates(root):
-        summary = _add(summary, scanned=1)
         if is_live_photo_motion(video):
-            summary = _add(summary, skipped_live=1)
+            summary = _add(summary, skipped=1)
             continue
         output = (compat_root / video.relative_to(root)).with_suffix(".mp4")
         if _is_output_current(video, output):
-            summary = _add(summary, skipped_existing=1)
-            continue
-        try:
-            signature = _signature(video)
-        except OSError as exc:
-            raise ConversionError(f"could not stat {video}: {exc}") from exc
-        cached = cache.get(str(video))
-        if cached == signature:
-            summary = _add(summary, skipped_non_hevc=1)
+            summary = _add(summary, skipped=1)
             continue
         codec = probe_video_codec(video)
         if codec not in HEVC_CODECS:
-            cache[str(video)] = signature
-            cache_changed = True
-            summary = _add(summary, skipped_non_hevc=1)
+            summary = _add(summary, skipped=1)
             continue
         transcode_to_mp4(video, output, crf=crf)
         summary = _add(summary, transcoded=1)
-    if cache_path is not None and cache_changed:
-        _save_cache(cache_path, cache)
     return summary
 
 
@@ -172,40 +152,6 @@ def _is_excluded(path: Path, root: Path, exclude_dirs: tuple[str, ...]) -> bool:
     return any(part in exclude_dirs for part in relative.parts[:-1])
 
 
-def _signature(path: Path) -> dict[str, int]:
-    stat = path.stat()
-    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
-
-
-def _load_cache(cache_path: Path | None) -> dict[str, dict[str, int]]:
-    if cache_path is None:
-        return {}
-    try:
-        raw = json.loads(cache_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    cache: dict[str, dict[str, int]] = {}
-    for path, value in raw.items():
-        if isinstance(path, str) and _is_signature(value):
-            cache[path] = value
-    return cache
-
-
-def _save_cache(cache_path: Path, cache: dict[str, dict[str, int]]) -> None:
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(json.dumps(cache, sort_keys=True), encoding="utf-8")
-
-
-def _is_signature(value: Any) -> bool:
-    return (
-        isinstance(value, dict)
-        and isinstance(value.get("size"), int)
-        and isinstance(value.get("mtime_ns"), int)
-    )
-
-
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -219,9 +165,6 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
 
 def _add(summary: ConvertSummary, **changes: int) -> ConvertSummary:
     return ConvertSummary(
-        scanned=summary.scanned + changes.get("scanned", 0),
         transcoded=summary.transcoded + changes.get("transcoded", 0),
-        skipped_live=summary.skipped_live + changes.get("skipped_live", 0),
-        skipped_existing=summary.skipped_existing + changes.get("skipped_existing", 0),
-        skipped_non_hevc=summary.skipped_non_hevc + changes.get("skipped_non_hevc", 0),
+        skipped=summary.skipped + changes.get("skipped", 0),
     )
