@@ -13,21 +13,29 @@ from photos_tool.gui_actions import (
 
 
 def test_build_send_argv_defaults_to_selected():
-    # JPEG/MP4 are config-only now: argv never carries copy flags.
-    assert build_send_argv("photos-tool") == ["photos-tool", "send"]
+    # The prefix is a list: dev (one element) and frozen (.app: python -m photos_tool) both
+    # splat uniformly. JPEG/MP4 are config-only, so argv never carries copy flags.
+    assert build_send_argv(["photos-tool"]) == ["photos-tool", "send"]
+    assert build_send_argv(["/p/python", "-m", "photos_tool"]) == [
+        "/p/python",
+        "-m",
+        "photos_tool",
+        "send",
+    ]
 
 
 def test_build_send_argv_album_and_config_only():
-    argv = build_send_argv("pt", album="Summer Trip", config="/c.toml")
+    argv = build_send_argv(["pt"], album="Summer Trip", config="/c.toml")
     assert argv == ["pt", "send", "--album", "Summer Trip", "--config", "/c.toml"]
 
 
 def test_build_send_argv_has_no_copy_flags():
-    argv = build_send_argv("pt", album="A")
-    assert "--jpeg" not in argv
-    assert "--no-jpeg" not in argv
-    assert "--mp4" not in argv
-    assert "--no-mp4" not in argv
+    for prefix in (["pt"], ["/p/python", "-m", "photos_tool"]):
+        argv = build_send_argv(prefix, album="A")
+        assert "--jpeg" not in argv
+        assert "--no-jpeg" not in argv
+        assert "--mp4" not in argv
+        assert "--no-mp4" not in argv
 
 
 def test_map_exit_code_covers_every_known_code():
@@ -73,29 +81,55 @@ def test_idle_working_and_result_glyphs_are_all_distinct():
     assert len(glyphs) == 5
 
 
-def test_parse_cleanup_query_reads_count_and_reveal():
-    q = parse_cleanup_query('{"count": 3, "destination": "/v", "reveal": "/v/2024/a.heic"}')
-    assert q == CleanupQuery(3, "/v/2024/a.heic")
+def test_parse_cleanup_query_reads_count_and_reveal_list():
+    # The whole batch (multiple files, multiple folders) is revealed, not one file.
+    q = parse_cleanup_query(
+        '{"count": 3, "destination": "/v", "reveal": ["/v/2024/08/a.heic", "/v/2024/09/b.mov"]}'
+    )
+    assert q == CleanupQuery(3, ("/v/2024/08/a.heic", "/v/2024/09/b.mov"))
+
+
+def test_parse_cleanup_query_tolerates_legacy_single_string_reveal():
+    # An older CLI emitted reveal as one path string; keep parsing it.
+    q = parse_cleanup_query('{"count": 1, "reveal": "/v/2024/01/a.heic"}')
+    assert q == CleanupQuery(1, ("/v/2024/01/a.heic",))
+
+
+def test_parse_cleanup_query_caps_reveal_list():
+    import json
+
+    from photos_tool.gui_actions import REVEAL_CAP
+
+    paths = [f"/v/2024/{i:03d}.heic" for i in range(REVEAL_CAP + 10)]
+    q = parse_cleanup_query(json.dumps({"count": len(paths), "reveal": paths}))
+    # Count is the true total; the reveal list is capped to a sane spot-check size.
+    assert q.count == REVEAL_CAP + 10
+    assert len(q.reveal) == REVEAL_CAP
 
 
 def test_parse_cleanup_query_empty_is_zero():
-    assert parse_cleanup_query("") == CleanupQuery(0, "")
-    assert parse_cleanup_query("   ") == CleanupQuery(0, "")
+    assert parse_cleanup_query("") == CleanupQuery(0, ())
+    assert parse_cleanup_query("   ") == CleanupQuery(0, ())
 
 
 def test_parse_cleanup_query_garbled_is_zero_not_crash():
     # A transient CLI hiccup must never be read as "things to delete".
-    assert parse_cleanup_query("not json at all") == CleanupQuery(0, "")
-    assert parse_cleanup_query("[1, 2, 3]") == CleanupQuery(0, "")
-    assert parse_cleanup_query('{"count": "oops"}') == CleanupQuery(0, "")
+    assert parse_cleanup_query("not json at all") == CleanupQuery(0, ())
+    assert parse_cleanup_query("[1, 2, 3]") == CleanupQuery(0, ())
+    assert parse_cleanup_query('{"count": "oops"}') == CleanupQuery(0, ())
 
 
 def test_parse_cleanup_query_negative_count_clamped():
-    assert parse_cleanup_query('{"count": -5}') == CleanupQuery(0, "")
+    assert parse_cleanup_query('{"count": -5}') == CleanupQuery(0, ())
 
 
 def test_parse_cleanup_query_missing_reveal_is_empty():
-    assert parse_cleanup_query('{"count": 2}') == CleanupQuery(2, "")
+    assert parse_cleanup_query('{"count": 2}') == CleanupQuery(2, ())
+
+
+def test_parse_cleanup_query_drops_non_string_reveal_entries():
+    q = parse_cleanup_query('{"count": 1, "reveal": ["/v/a.heic", 5, null, "/v/b.mov"]}')
+    assert q == CleanupQuery(1, ("/v/a.heic", "/v/b.mov"))
 
 
 def test_cleanup_messages_mention_count_and_recovery():
@@ -114,4 +148,5 @@ def test_menubar_imports_without_the_gui_extra():
     import photos_tool.menubar as menubar
 
     assert callable(menubar.main)
-    assert menubar._executable()
+    prefix = menubar._cli_prefix()
+    assert isinstance(prefix, list) and prefix and all(isinstance(p, str) for p in prefix)

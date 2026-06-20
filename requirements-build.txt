@@ -1,0 +1,3 @@
+# Build-only dependency: produces dist/photos-tool.app via `python setup.py py2app`.
+# Deliberately NOT in pyproject [project.dependencies] so the runtime/wheel stays clean.
+py2app>=0.28.8

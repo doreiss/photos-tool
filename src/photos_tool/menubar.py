@@ -47,16 +47,47 @@ from .gui_actions import (
 )
 
 
-def _executable() -> str:
-    # Prefer the photos-tool console script installed right next to this menubar
-    # script (same venv / app bundle) so the GUI always drives its own versioned
-    # CLI, not some other photos-tool on PATH (e.g. a stale pyenv shim). Fall back
-    # to PATH. subprocess resolves a relative name via the parent PATH (not our
-    # augmented env), so always return an absolute path when we have one.
+def _cli_prefix() -> list[str]:
+    """The argv prefix used to run the photos-tool CLI, as a list.
+
+    Frozen (py2app .app): the bundle's OWN embedded framework interpreter running
+    ``-m photos_tool``, so the osxphotos export and the PhotoKit delete are done by a
+    binary inside the app's code signature and TCC attributes Photos to the app (the
+    prompt reads "photos-tool", the grant is reused). NOTE: under py2app ``sys.executable``
+    is the app *stub* — running it would re-launch this menu-bar app — so we must locate
+    the real framework interpreter and never fall back to the stub.
+
+    Dev/CI: the sibling ``photos-tool`` console script in the venv (today's behaviour),
+    returned as a one-element list so callers always splat ``[*prefix, subcmd, ...]``.
+    """
+    is_frozen = getattr(sys, "frozen", False) or ".app/Contents/" in sys.executable
+    if is_frozen:
+        stub = Path(sys.executable).resolve()
+        macos_dir = stub.parent  # .../Contents/MacOS
+        contents = macos_dir.parent  # .../Contents
+        ver = f"{sys.version_info.major}.{sys.version_info.minor}"  # e.g. 3.11
+        fw_bin = contents / "Frameworks" / "Python.framework" / "Versions" / ver / "bin"
+        candidates = [
+            fw_bin / f"python{ver}",
+            fw_bin / "python3",
+            macos_dir / "python3",
+            macos_dir / "python",
+        ]
+        for cand in candidates:
+            if cand.exists() and not cand.samefile(stub):
+                return [str(cand), "-m", "photos_tool"]
+        # Never re-run the stub: fail loudly so the build gets fixed.
+        raise RuntimeError(
+            "bundled python interpreter not found next to the app stub; checked: "
+            f"{[str(c) for c in candidates]}"
+        )
+    # Dev/CI: prefer the photos-tool console script next to sys.argv[0] (same venv) so the
+    # GUI drives its own versioned CLI, not a stale pyenv shim. Fall back to PATH. Return an
+    # absolute path when we have one.
     sibling = Path(sys.argv[0]).resolve().parent / "photos-tool"
     if sibling.exists():
-        return str(sibling)
-    return shutil.which("photos-tool") or "photos-tool"
+        return [str(sibling)]
+    return [shutil.which("photos-tool") or "photos-tool"]
 
 
 def _env() -> dict[str, str]:
@@ -104,7 +135,7 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
         rumps.alert("photos-tool is already running", "Look for the 📷 icon in the menu bar.")
         sys.exit(0)
 
-    exe = _executable()
+    cli_prefix = _cli_prefix()
     env = _env()
 
     class PhotosToolApp(rumps.App):
@@ -238,7 +269,10 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
             if resp != 1:  # Cancel
                 return
             if query.reveal:
-                subprocess.run(["open", "-R", query.reveal], check=False)
+                # Reveal-and-select EVERY still-present copy (across whatever date
+                # folders the batch spans), so the user confirms the whole batch
+                # arrived — not just one zoomed-in file.
+                subprocess.run(["open", "-R", *query.reveal], check=False)
             # Step 3: only now offer the recoverable deletion.
             confirm = confirm_delete_message(query.count)
             resp = rumps.alert(
@@ -267,7 +301,7 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
                     self._results.put({"kind": "error", "title": "Error", "message": str(exc)})
 
         def _do_send(self, album: str | None) -> dict[str, Any]:
-            argv = build_send_argv(exe, album=album)
+            argv = build_send_argv(cli_prefix, album=album)
             try:
                 # No terminal in a GUI launch: fully detach the child's stdio so a
                 # background osxphotos progress bar can't get SIGTTIN-suspended.
@@ -286,7 +320,7 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
         def _do_cleanup_query(self) -> dict[str, Any]:
             try:
                 proc = subprocess.run(
-                    [exe, "cleanup-last", "--json"],
+                    [*cli_prefix, "cleanup-last", "--json"],
                     env=env,
                     capture_output=True,
                     text=True,
@@ -300,7 +334,7 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
         def _do_cleanup_apply(self) -> dict[str, Any]:
             try:
                 proc = subprocess.run(
-                    [exe, "cleanup-last", "--yes"],
+                    [*cli_prefix, "cleanup-last", "--yes"],
                     env=env,
                     capture_output=True,
                     text=True,
@@ -315,7 +349,7 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
         def _do_doctor(self) -> dict[str, Any]:
             try:
                 proc = subprocess.run(
-                    [exe, "doctor"],
+                    [*cli_prefix, "doctor"],
                     env=env,
                     capture_output=True,
                     text=True,

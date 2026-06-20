@@ -27,18 +27,22 @@ class Notification:
 
 
 def build_send_argv(
-    executable: str,
+    cli_prefix: list[str],
     *,
     album: str | None = None,
     config: str | None = None,
 ) -> list[str]:
     """Build the ``photos-tool send`` argv for a menu action.
 
+    ``cli_prefix`` is the CLI invocation as a list: ``["/abs/photos-tool"]`` in dev, or
+    ``["/abs/bundle-python", "-m", "photos_tool"]`` when running frozen inside the signed
+    .app (so the osxphotos/PhotoKit children inherit the bundle's TCC identity).
+
     JPEG/MP4/remove are config-only (set once at init): the GUI never passes
     ``--jpeg``/``--mp4`` so the CLI's config — the single source of truth —
     decides. The only per-action input is which album (or selection) to send.
     """
-    argv = [executable, "send"]
+    argv = [*cli_prefix, "send"]
     if album:
         argv += ["--album", album]
     if config:
@@ -83,13 +87,20 @@ def status_glyph(code: int | None) -> str:
     return "📷⚠️"
 
 
+# Cap how many files the cleanup reveal selects in Finder: a human spot-check of a
+# few files across the batch's folders is enough, and it avoids a window storm for a
+# huge batch. The prompt always states the true total separately.
+REVEAL_CAP = 30
+
+
 @dataclass(frozen=True)
 class CleanupQuery:
-    """Result of ``cleanup-last --json``: how many originals are removable and a
-    Finder-revealable path that proves they really landed on the share."""
+    """Result of ``cleanup-last --json``: how many originals are removable and the
+    still-present backup copies (up to :data:`REVEAL_CAP`) to reveal-and-select in
+    Finder so the user can confirm the whole batch — not one file — really landed."""
 
     count: int
-    reveal: str
+    reveal: tuple[str, ...]
 
 
 def parse_cleanup_query(stdout: str) -> CleanupQuery:
@@ -101,15 +112,20 @@ def parse_cleanup_query(stdout: str) -> CleanupQuery:
     try:
         data = json.loads(stdout.strip() or "{}")
     except json.JSONDecodeError:
-        return CleanupQuery(0, "")
+        return CleanupQuery(0, ())
     if not isinstance(data, dict):
-        return CleanupQuery(0, "")
+        return CleanupQuery(0, ())
     try:
         count = int(data.get("count", 0))
     except (TypeError, ValueError):
         count = 0
-    reveal = data.get("reveal", "")
-    return CleanupQuery(max(count, 0), str(reveal) if reveal else "")
+    raw = data.get("reveal", [])
+    if isinstance(raw, str):  # back-compat: an older CLI emitted a single path
+        raw = [raw] if raw else []
+    if not isinstance(raw, list):
+        raw = []
+    reveal = tuple(p for p in raw if isinstance(p, str) and p)[:REVEAL_CAP]
+    return CleanupQuery(max(count, 0), reveal)
 
 
 def confirm_reveal_message(count: int) -> Notification:
