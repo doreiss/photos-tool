@@ -52,9 +52,14 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
     class PhotosToolApp(rumps.App):
         def __init__(self) -> None:
             super().__init__("📷", quit_button="Quit")
+            # An always-visible result line: Notification Center alerts only work
+            # from a signed .app bundle, so this is the reliable feedback unbundled.
+            self.status = rumps.MenuItem("Last backup: none yet")
             self.jpeg = rumps.MenuItem("JPEG copies for Windows", callback=self._toggle)
             self.mp4 = rumps.MenuItem("MP4 copies for Windows", callback=self._toggle)
             self.menu = [
+                self.status,
+                None,
                 "Send Selected Photos",
                 "Send Album…",
                 None,
@@ -84,10 +89,24 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
                     stderr=subprocess.DEVNULL,
                 ).returncode
             except OSError as exc:
-                rumps.notification("Could not run photos-tool", "", str(exc))
+                self._report(None, "Could not run photos-tool", str(exc))
                 return
             note = map_exit_code(code)
-            rumps.notification(note.title, "", note.message)
+            self._report(code, note.title, note.message)
+
+        def _report(self, code: int | None, title: str, message: str) -> None:
+            if code is None:
+                glyph = "📷✕"
+            elif code == 0:
+                glyph = "📷✓"
+            else:
+                glyph = "📷⚠️"
+            self.title = glyph
+            self.status.title = f"Last backup: {title}"
+            try:  # best effort — Notification Center only works from a signed .app
+                rumps.notification(title, "", message)
+            except Exception:
+                pass
 
         @rumps.clicked("Send Selected Photos")
         def send_selected(self, _: rumps.MenuItem) -> None:
