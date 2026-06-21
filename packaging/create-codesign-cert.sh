@@ -18,7 +18,9 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CNF="$REPO/packaging/codesign-cert.cnf"
 LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 
-if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$CN"; then
+# No -v: a self-signed identity is "not trusted" so `find-identity -v` hides it, but codesign
+# uses it fine. Detect it policy-agnostically so we don't recreate an existing one.
+if security find-identity -p codesigning 2>/dev/null | grep -qF "$CN"; then
   echo "Identity '$CN' already exists — nothing to do."
   exit 0
 fi
@@ -41,13 +43,22 @@ trap 'rm -f "$KEY" "$CRT" "$P12"' EXIT
 # can't detect the format and fails with "SecKeychainItemImport: Unknown format in import".
 security import "$P12" -f pkcs12 -k "$LOGIN_KEYCHAIN" -P "$P12_PASS" -T /usr/bin/codesign
 
-# Authorize codesign to use the key without a GUI prompt on every build. This needs your
-# login/keychain password once.
-read -rsp "Enter your macOS login (keychain) password to authorize codesign: " KCPASS
+# OPTIONAL: pre-authorize codesign to use the key so builds don't pop a keychain prompt. This
+# needs your login/keychain password; if it's wrong or skipped, the cert still works fine —
+# codesign just asks once on the first build, where you click "Always Allow". Non-fatal.
+read -rsp "Login/keychain password to skip the per-build prompt (or press Enter to skip): " KCPASS
 echo
-security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPASS" "$LOGIN_KEYCHAIN" >/dev/null
+if [ -n "$KCPASS" ]; then
+  if security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPASS" \
+       "$LOGIN_KEYCHAIN" >/dev/null 2>&1; then
+    echo "  codesign authorized — no keychain prompt on build."
+  else
+    echo "  (couldn't pre-authorize — codesign will prompt once on the first build; click 'Always Allow'.)"
+  fi
+fi
 
-if security find-identity -v -p codesigning | grep -qF "$CN"; then
+# No -v: the self-signed identity is "not trusted" but codesign uses it fine.
+if security find-identity -p codesigning | grep -qF "$CN"; then
   echo "Created code-signing identity '$CN'."
   echo "Now run: ./scripts/build-app.sh --install   (it will sign with this identity)."
   echo "Then run the one-time tccutil reset + re-grant noted at the top of this script."

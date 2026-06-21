@@ -82,7 +82,9 @@ echo "==> Code signing"
 # no-Team-ID dylibs ("mapped file has no Team ID"); the build is intentionally un-notarized.
 CODESIGN_CN="photos-tool Self-Signed"
 SIGNED_STABLE=0
-if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$CODESIGN_CN"; then
+# NB: no -v. A self-signed identity is "not trusted" (no CA chain), so `find-identity -v`
+# hides it — but codesign signs with it fine (it never evaluates trust).
+if security find-identity -p codesigning 2>/dev/null | grep -qF "$CODESIGN_CN"; then
   echo "  signing with stable identity '$CODESIGN_CN' (grants persist across rebuilds)"
   codesign --force --deep --sign "$CODESIGN_CN" --identifier "$BUNDLE_ID" "$APP"
   SIGNED_STABLE=1
