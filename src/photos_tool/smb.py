@@ -77,9 +77,17 @@ def ensure_mounted(
 
 
 def _mount_output_has_path(output: str, mount_point: Path) -> bool:
+    # `mount` prints "<device> on <mount-point> (<options>)". Extract the mount-point
+    # FIELD and compare it exactly, instead of substring-matching " on <target> " — a
+    # substring can false-positive on a device/option string that merely contains the
+    # target (e.g. another volume mounted at a path that embeds this one).
     target = str(mount_point)
     for line in output.splitlines():
-        if f" on {target} " in line or line.endswith(f" on {target}"):
+        _, sep, rest = line.partition(" on ")
+        if not sep:
+            continue
+        path = rest.rsplit(" (", 1)[0] if " (" in rest else rest
+        if path.strip() == target:
             return True
     return False
 

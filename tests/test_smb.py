@@ -93,3 +93,29 @@ def test_ensure_mounted_raises_when_mounted_but_not_writable(tmp_path: Path):
         assert "not writable" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected SmbError")
+
+
+def test_is_mounted_matches_mount_point_field_exactly(tmp_path: Path):
+    target = tmp_path / "Share"
+
+    # The target string appears only inside ANOTHER line's device/options, never as a
+    # real mount-point field -> must NOT be reported mounted (the old substring match would).
+    decoy = (
+        f"//u@pc/Backup on {tmp_path}/Share2 (smbfs)\n"  # sibling path that embeds "Share"
+        f"/dev/disk3 on / (apfs, mounted by, note: {target})\n"  # target only in an option blurb
+    )
+
+    def run_decoy(cmd: list[str], **_kwargs: Any):
+        return completed(decoy)
+
+    assert is_mounted(target, run=run_decoy) is False
+
+    # Exact field match still works, with or without a trailing options group.
+    def run_with_opts(cmd: list[str], **_kwargs: Any):
+        return completed(f"//u@pc/Share on {target} (smbfs, nodev)\n")
+
+    def run_no_opts(cmd: list[str], **_kwargs: Any):
+        return completed(f"//u@pc/Share on {target}\n")
+
+    assert is_mounted(target, run=run_with_opts)
+    assert is_mounted(target, run=run_no_opts)
