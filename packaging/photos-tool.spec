@@ -51,6 +51,16 @@ a = Analysis(
     excludes=["tkinter"],
     noarchive=False,
 )
+# Bundle our own exiftool (script + Perl lib tree, run via the system perl) so the .app embeds
+# Photos metadata on a clean Mac with no Homebrew. scripts/build-app.sh fetches it here first.
+_EXIFTOOL_DIR = os.path.join(SPECPATH, "exiftool")
+if not os.path.exists(os.path.join(_EXIFTOOL_DIR, "exiftool")):
+    raise SystemExit(
+        "packaging/exiftool/exiftool is missing — build via scripts/build-app.sh, which fetches "
+        "exiftool before running PyInstaller."
+    )
+exiftool_tree = Tree(_EXIFTOOL_DIR, prefix="exiftool")
+
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
@@ -62,7 +72,7 @@ exe = EXE(
     target_arch="arm64",
     codesign_identity=None,  # ad-hoc signed by scripts/build-app.sh after the build
 )
-coll = COLLECT(exe, a.binaries, a.datas, name="photos-tool")
+coll = COLLECT(exe, a.binaries, a.datas, exiftool_tree, name="photos-tool")
 app = BUNDLE(
     coll,
     name="photos-tool.app",

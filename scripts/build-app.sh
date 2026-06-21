@@ -37,21 +37,75 @@ echo "==> Ensuring the build toolchain is present"
 "$PY" -c "import PyInstaller" 2>/dev/null || "$PY" -m pip install -r requirements-build.txt
 "$PY" -c "import photos_tool" 2>/dev/null || "$PY" -m pip install -e '.[gui]'
 
+echo "==> Ensuring the bundled exiftool is present"
+# Ship our own exiftool (script + Perl lib tree, run via the system /usr/bin/perl) so the .app
+# embeds Photos metadata on a clean Mac with no Homebrew. Fetched (not committed) from a pinned
+# GitHub tag + verified by sha256, so the repo stays lean and the build is reproducible.
+EXIFTOOL_VER=13.30
+EXIFTOOL_SHA=52c034031714f05b556776a4e458124947d561b752c8b24a6740ac0f718af9bd
+EXIFTOOL_DIR="$REPO/packaging/exiftool"
+if [ ! -x "$EXIFTOOL_DIR/exiftool" ]; then
+  echo "  fetching exiftool $EXIFTOOL_VER"
+  TARBALL="$(mktemp -t exiftool-tgz)"
+  curl -fsSL -o "$TARBALL" \
+    "https://github.com/exiftool/exiftool/archive/refs/tags/${EXIFTOOL_VER}.tar.gz"
+  echo "${EXIFTOOL_SHA}  ${TARBALL}" | shasum -a 256 -c - \
+    || { echo "ERROR: exiftool tarball checksum mismatch" >&2; exit 1; }
+  TMPX="$(mktemp -d)"
+  tar xzf "$TARBALL" -C "$TMPX"
+  rm -rf "$EXIFTOOL_DIR"
+  mkdir -p "$EXIFTOOL_DIR"
+  cp "$TMPX/exiftool-${EXIFTOOL_VER}/exiftool" "$EXIFTOOL_DIR/exiftool"
+  cp -R "$TMPX/exiftool-${EXIFTOOL_VER}/lib" "$EXIFTOOL_DIR/lib"
+  chmod +x "$EXIFTOOL_DIR/exiftool"
+  rm -rf "$TMPX" "$TARBALL"
+fi
+"$EXIFTOOL_DIR/exiftool" -ver >/dev/null || { echo "ERROR: bundled exiftool does not run" >&2; exit 1; }
+
 echo "==> Cleaning previous build"
 rm -rf "$REPO/build" "$APP"
 
 echo "==> Building with PyInstaller"
 "$PY" -m PyInstaller --noconfirm --log-level WARN "$SPEC"
 
-echo "==> Ad-hoc code signing"
-codesign --force --deep --sign - "$APP"
+# PyInstaller bundles the exiftool script as DATA (no +x); restore it so shutil.which finds it
+# inside the app. Do it BEFORE signing so the signature seals the executable bit. Path differs
+# by PyInstaller version (Contents/Frameworks vs MacOS), so locate it.
+BUNDLED_EXIFTOOL="$(find "$APP/Contents" -type f -path '*/exiftool/exiftool' | head -1)"
+[ -n "$BUNDLED_EXIFTOOL" ] || { echo "ERROR: bundled exiftool missing from the built .app" >&2; exit 1; }
+chmod +x "$BUNDLED_EXIFTOOL"
+
+echo "==> Code signing"
+# Prefer the stable self-signed identity if it exists (DR = identifier + cert leaf, so TCC
+# grants survive rebuilds). Otherwise ad-hoc (cdhash DR changes every build -> re-grant each
+# reinstall). NO --options runtime: Hardened Runtime's Library Validation rejects PyInstaller's
+# no-Team-ID dylibs ("mapped file has no Team ID"); the build is intentionally un-notarized.
+CODESIGN_CN="photos-tool Self-Signed"
+SIGNED_STABLE=0
+if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$CODESIGN_CN"; then
+  echo "  signing with stable identity '$CODESIGN_CN' (grants persist across rebuilds)"
+  codesign --force --deep --sign "$CODESIGN_CN" --identifier "$BUNDLE_ID" "$APP"
+  SIGNED_STABLE=1
+else
+  echo "  ad-hoc signing — TCC grants will NOT survive a rebuild. For persistence, run"
+  echo "  'packaging/create-codesign-cert.sh' once, then rebuild."
+  codesign --force --deep --sign - "$APP"
+fi
 
 echo "==> Verifying signature + bundle shape"
 codesign --verify --deep --strict --verbose=2 "$APP"
 if codesign -dv --verbose=2 "$APP" 2>&1 | grep -q "Identifier=$BUNDLE_ID"; then
-  echo "  signed as $BUNDLE_ID (ad-hoc)"
+  echo "  signed as $BUNDLE_ID"
 else
   echo "  WARNING: signed identifier is not $BUNDLE_ID" >&2
+fi
+if [ "$SIGNED_STABLE" = "1" ]; then
+  if codesign -d -r- "$APP" 2>&1 | grep -q "identifier \"$BUNDLE_ID\" and certificate leaf"; then
+    echo "  designated requirement is identifier+leaf (TCC grants persist across rebuilds)"
+  else
+    echo "ERROR: DR is not identifier+leaf — grants would not persist; check the cert" >&2
+    exit 1
+  fi
 fi
 EXE="$APP/Contents/MacOS/photos-tool"
 if ! file "$EXE" | grep -q "Mach-O"; then
@@ -86,6 +140,10 @@ case "$prime_out" in
   *"pyi-prime-imports OK"*) ;;
   *) echo "ERROR: --pyi-prime-imports smoke failed: $prime_out" >&2; exit 1 ;;
 esac
+# Prove the bundled exiftool runs (script + Perl lib found, executable) so the .app can embed
+# metadata on a clean Mac with no Homebrew.
+et_version="$("$BUNDLED_EXIFTOOL" -ver)"
+printf '  bundled exiftool: %s\n' "${et_version%%$'\n'*}"
 
 if [ "$INSTALL" = "1" ]; then
   echo "==> Installing to /Applications"

@@ -158,8 +158,12 @@ environment `pypi`) before the first tag.
 - [x] No-Terminal `.app` bundle of the menu-bar app (PyInstaller, ad-hoc signed;
       `scripts/build-app.sh`). Self-reinvokes so osxphotos/PhotoKit run under the app's
       own TCC identity; declares the Photos/Automation usage descriptions.
-- [ ] Stable-signed (self-signed cert) `.app` so the macOS grants survive rebuilds
-      instead of re-prompting on each reinstall.
+- [x] `.app` bundles its own exiftool (script + Perl lib, run via the system perl; fetched
+      at build, verified by sha256) so it needs **no Homebrew** on the target Mac.
+- [x] Optional stable self-signed signing identity (`packaging/create-codesign-cert.sh`) so
+      the macOS grants survive rebuilds; `build-app.sh` auto-uses it when present.
+- [ ] Bundle a fully self-contained exiftool (PAR `pp`) so it survives Apple removing the
+      system Perl in a future macOS.
 
 ## License
 

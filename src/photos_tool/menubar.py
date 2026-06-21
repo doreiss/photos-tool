@@ -34,7 +34,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from ._frozen import is_pyinstaller_bundle
+from ._frozen import bundled_exiftool_dir, is_pyinstaller_bundle
 from .config import DEFAULT_STATE_DIR, default_config_path
 from .gui_actions import (
     IDLE_GLYPH,
@@ -159,6 +159,7 @@ def request_photos_automation() -> int | None:
     try:
         import ctypes
         import threading
+        import time
         from ctypes import c_int32, c_uint8, c_uint32, c_void_p
 
         from AppKit import (
@@ -214,11 +215,16 @@ def request_photos_automation() -> int | None:
 
             worker = threading.Thread(target=_ask, name="photos-automation", daemon=True)
             worker.start()
-            # This join blocks the main rumps thread until the user answers the dialog -- a
-            # one-time, first-grant cost (cached above thereafter). The 120s ceiling only bites
-            # on a true semaphore-wait hang, recovering rather than freezing forever.
-            worker.join(timeout=120)
-            status = result.get("status")  # None if it hung past the timeout
+            # Pump the run loop in short slices instead of blocking the main thread on join(),
+            # so the menu bar stays responsive while the consent dialog is up (and through the
+            # rare semaphore-wait hang). The worker sets the result the instant the user answers;
+            # the 120s ceiling only bounds a true hang. Re-entry during the pump is blocked by
+            # _CONSENT_IN_FLIGHT (set above) and by send_selected's own guard.
+            run_loop = NSRunLoop.currentRunLoop()
+            deadline = time.monotonic() + 120
+            while worker.is_alive() and time.monotonic() < deadline:
+                run_loop.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.1))
+            status = result.get("status")  # None if it hung past the deadline
             if status == 0:
                 _AUTOMATION_GRANTED = True
             return status
@@ -275,7 +281,21 @@ def _maybe_dispatch_reinvocation(argv: list[str]) -> int | None:
     return None
 
 
+def _prepend_bundled_exiftool_to_path() -> None:
+    """Put the bundled exiftool first on PATH for THIS process and every child it spawns.
+
+    Covers both consumers with one change: osxphotos resolves exiftool via ``shutil.which`` and
+    convert.py runs a bare ``exiftool`` — both inherit ``os.environ``. Called at the very top of
+    every frozen entry (main + the --pyi-cli / --pyi-osxphotos children all funnel through here),
+    so a clean Mac with no Homebrew still embeds metadata. No-op in dev/CI.
+    """
+    directory = bundled_exiftool_dir()
+    if directory:
+        os.environ["PATH"] = directory + os.pathsep + os.environ.get("PATH", "")
+
+
 def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
+    _prepend_bundled_exiftool_to_path()
     dispatched = _maybe_dispatch_reinvocation(sys.argv[1:])
     if dispatched is not None:
         raise SystemExit(dispatched)
@@ -404,6 +424,8 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
 
         @rumps.clicked("Send Selected Photos")
         def send_selected(self, _: Any) -> None:
+            if _CONSENT_IN_FLIGHT:
+                return  # a consent prompt is already up (re-click while the run loop pumps)
             # One-time "control Photos" consent (Apple Events) so osxphotos can read the live
             # selection. 0 == granted; None == could-not-ask (best-effort send anyway, the
             # send's own "nothing selected" path covers a still-missing grant); a real denial
