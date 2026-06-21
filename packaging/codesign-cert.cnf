@@ -1,0 +1,19 @@
+# OpenSSL config for the photos-tool self-signed CODE-SIGNING certificate.
+# Used by packaging/create-codesign-cert.sh. The codeSigning EKU is mandatory — without it
+# `codesign` refuses the identity. A stable cert gives the .app a designated requirement of
+# "identifier + certificate leaf", so macOS TCC grants survive rebuilds (vs the ad-hoc cdhash
+# DR, which changes every build and forces a re-grant).
+[ req ]
+default_bits        = 2048
+default_md          = sha256
+prompt              = no
+distinguished_name  = dn
+x509_extensions     = v3_codesign
+
+[ dn ]
+CN = photos-tool Self-Signed
+
+[ v3_codesign ]
+basicConstraints       = critical, CA:false
+keyUsage               = critical, digitalSignature
+extendedKeyUsage       = critical, codeSigning
