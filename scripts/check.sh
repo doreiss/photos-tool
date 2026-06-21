@@ -32,7 +32,7 @@ fi
 
 if command -v shellcheck >/dev/null 2>&1; then
   echo "== shellcheck =="
-  shellcheck scripts/*.sh
+  shellcheck scripts/*.sh packaging/*.sh
 fi
 
 echo "All checks passed."

@@ -30,7 +30,7 @@ jobs:
       - run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
       - run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - run: actionlint
-      - run: shellcheck scripts/*.sh
+      - run: shellcheck scripts/*.sh packaging/*.sh
 
   test:
     runs-on: ubuntu-latest
@@ -96,7 +96,8 @@ jobs:
       - name: Install the real external toolchain
         run: |
           brew install exiftool ffmpeg
-          pip install osxphotos==0.76.1
+          # osxphotos==0.76.1 is already installed by `pip install -e ".[dev]"` above
+          # (pinned in pyproject's darwin core dep) — pyproject is the single source of truth.
       - name: Smoke-test the toolchain on a clean arm64 Mac
         run: |
           echo "arch: $(uname -m)"
