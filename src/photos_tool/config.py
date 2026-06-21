@@ -93,10 +93,6 @@ def default_config_path() -> Path:
     return Path("~/.config/photos-tool/config.toml").expanduser()
 
 
-def expand_path(value: str) -> Path:
-    return Path(value).expanduser()
-
-
 def resolved_exportdb_path(destination: str | Path, exportdb_dir: str | Path | None = None) -> Path:
     """Return a stable local export DB path for one destination tree."""
     root = Path(exportdb_dir or StateConfig().exportdb_dir).expanduser()

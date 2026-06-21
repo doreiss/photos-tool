@@ -259,3 +259,13 @@ def test_parse_connect_result_ok_failure_and_garble():
     assert parse_connect_result("not json").ok is False
     assert parse_connect_result("[1, 2]").ok is False
     assert parse_connect_result("").ok is False
+
+
+def test_connect_success_message_surfaces_full_disk_access():
+    # FDA is the one grant macOS never prompts for, and a hard prerequisite — onboarding must
+    # name it (alongside the destination) so a new user enables it before the first Send.
+    from photos_tool.gui_actions import connect_success_message
+
+    note = connect_success_message("/Volumes/Share/MacA")
+    assert "/Volumes/Share/MacA" in note.message
+    assert "Full Disk Access" in note.message

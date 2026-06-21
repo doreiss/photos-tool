@@ -50,9 +50,9 @@ def build_send_argv(
 ) -> list[str]:
     """Build the ``photos-tool send`` argv for a menu action.
 
-    ``cli_prefix`` is the CLI invocation as a list: ``["/abs/photos-tool"]`` in dev, or
-    ``["/abs/bundle-python", "-m", "photos_tool"]`` when running frozen inside the signed
-    .app (so the osxphotos/PhotoKit children inherit the bundle's TCC identity).
+    ``cli_prefix`` is the CLI invocation as a list: ``["/abs/photos-tool"]`` (the sibling console
+    script) in dev, or ``[sys.executable, "--pyi-cli"]`` when frozen — re-invoking the app's own
+    signed binary so the osxphotos/PhotoKit children inherit the bundle's TCC identity.
 
     JPEG/MP4/remove are config-only (set once at init): the GUI never passes
     ``--jpeg``/``--mp4`` so the CLI's config — the single source of truth —
@@ -223,7 +223,9 @@ def connect_success_message(destination: str) -> Notification:
     return Notification(
         "Connected",
         f"Your photos will back up to:\n{destination}\n\n"
-        "Select photos in Photos, then click Send Selected Photos.",
+        "One-time setup: enable photos-tool under System Settings > Privacy & "
+        "Security > Full Disk Access, then quit and reopen this app.\n\n"
+        "Then select photos in Photos and click Send Selected Photos.",
     )
 
 

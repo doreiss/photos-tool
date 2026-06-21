@@ -36,10 +36,6 @@ class ExportResult:
         return self.returncode == 0
 
 
-def count_selected(timeout: float = 60) -> int:
-    return count_assets(scope="selected", timeout=timeout)
-
-
 def count_assets(scope: str = "selected", album: str | None = None, timeout: float = 60) -> int:
     cmd = ["osxphotos", "query"]
     if scope == "selected":

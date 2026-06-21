@@ -81,8 +81,11 @@ def _cli_prefix() -> list[str]:
 
 
 def _env() -> dict[str, str]:
-    # A GUI app launched from Finder inherits a minimal PATH; make sure the tools
-    # (and the venv's photos-tool) are findable.
+    # A GUI app launched from Finder inherits a minimal PATH. These entries serve the DEV/CI
+    # console-script path: find the venv's photos-tool sibling and a Homebrew osxphotos/exiftool.
+    # The frozen .app doesn't depend on them — it reaches the CLI via --pyi-cli, self-reinvokes
+    # osxphotos, and prepends its bundled exiftool (so it works on a clean Mac with no Homebrew);
+    # a Homebrew exiftool, if present, would still be found here.
     env = dict(os.environ)
     extra = [
         str(Path(sys.argv[0]).resolve().parent),
@@ -424,6 +427,12 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
 
         @rumps.clicked("Send Selected Photos")
         def send_selected(self, _: Any) -> None:
+            # Not connected yet? Onboard first, rather than popping the control-Photos consent
+            # for an action that can't succeed. Use the LIVE config path (the cached _configured
+            # goes stale if the user ran `photos-tool init` from the CLI).
+            if not default_config_path().exists():
+                self._run_setup()
+                return
             if _CONSENT_IN_FLIGHT:
                 return  # a consent prompt is already up (re-click while the run loop pumps)
             # One-time "control Photos" consent (Apple Events) so osxphotos can read the live
@@ -445,6 +454,9 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
 
         @rumps.clicked("Clean up last backup…")
         def cleanup_clicked(self, _: Any) -> None:
+            if not default_config_path().exists():  # onboard before any backup/cleanup
+                self._run_setup()
+                return
             # Linear flow, step 1: ask the CLI how many originals are confirmed on
             # the share and where to reveal them. Runs on the worker; the Timer
             # continues the flow once the answer arrives.
