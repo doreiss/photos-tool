@@ -2,7 +2,16 @@
 
 This builds, signs, and installs the no-Terminal `.app`. The `.app` bundles its own exiftool
 (run via the system perl) and self-reinvokes its own signed binary, so it needs **no Homebrew**
-on the target Mac. Do this once on the Mac that will run backups.
+on the target Mac. **Apple-Silicon only** (the bundle is arm64).
+
+Two ways to use it:
+
+- **Same Mac** — you build *and* run backups on this Mac: do sections 1–4 below.
+- **A different / fresh Mac runs the backups** (e.g. a family MacBook) — you do NOT need Xcode,
+  Homebrew, Python, or the cert on that Mac. Build + sign **once** on your dev Mac (sections 1–3),
+  then copy the signed `dist/photos-tool.app` to the other Apple-Silicon Mac (AirDrop, a USB drive,
+  or zip it) and do **only section 4** there. The signature self-validates offline and the macOS
+  grants are per-Mac (granted once locally), so the received `.app` just works — see section 5.
 
 ## 1. One-time build environment
 
@@ -61,3 +70,19 @@ manual approval:
 Steps 3, 5, 6 are the only permissions, granted once. Because the app is signed with the stable
 identity, **they persist** — rebuilding/reinstalling never re-prompts. Run *Run Diagnostics* to
 confirm every check is green.
+
+## 5. Receiving a prebuilt .app on a fresh Mac (no build tools)
+
+When the backups run on a *different* Apple-Silicon Mac than the one you built on, that Mac needs
+nothing from Homebrew/Python/Xcode — the bundle is self-contained (its own Python, exiftool, and
+osxphotos). On the fresh Mac:
+
+1. Copy the signed `photos-tool.app` over (AirDrop / USB / unzip) into `/Applications`.
+2. Skip the `tccutil reset` in section 3 — that migration is only for a Mac that previously ran an
+   *ad-hoc*-signed build. A fresh Mac has no prior grants to clear.
+3. Do section 4 (right-click → Open, Login Items, Full Disk Access, set up the connection, then the
+   first Send and first Clean up grants). The cert's private key is **not** needed at runtime — the
+   signature self-validates offline — and TCC grants are per-Mac, so this Mac grants once and they
+   persist here too.
+4. Run *Run Diagnostics* and confirm the bundled osxphotos and exiftool resolve (proves the bundle
+   is self-contained on a machine with no Homebrew).
