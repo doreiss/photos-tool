@@ -37,7 +37,9 @@ trap 'rm -f "$KEY" "$CRT" "$P12"' EXIT
 
 "$OPENSSL" req -x509 -newkey rsa:2048 -nodes -keyout "$KEY" -out "$CRT" -days 3650 -config "$CNF"
 "$OPENSSL" pkcs12 -export -legacy -inkey "$KEY" -in "$CRT" -name "$CN" -out "$P12" -passout pass:"$P12_PASS"
-security import "$P12" -k "$LOGIN_KEYCHAIN" -P "$P12_PASS" -T /usr/bin/codesign
+# -f pkcs12 is REQUIRED: the temp file has no .p12 extension, so without it `security import`
+# can't detect the format and fails with "SecKeychainItemImport: Unknown format in import".
+security import "$P12" -f pkcs12 -k "$LOGIN_KEYCHAIN" -P "$P12_PASS" -T /usr/bin/codesign
 
 # Authorize codesign to use the key without a GUI prompt on every build. This needs your
 # login/keychain password once.
