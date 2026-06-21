@@ -62,14 +62,22 @@ photos-tool init       # asks for the SMB URL, mount point, and a per-Mac subfol
                        # (defaults to this Mac's name — keep it unless you have a reason)
 ```
 
-Then, the three one-time macOS grants (all in `docs/windows-setup.md`):
+Then the one-time macOS grants (details in `docs/windows-setup.md`):
 
 1. **Finder → Connect to Server →** `smb://<pc>/<share>`, log in, and check
    "Remember this password in my keychain" (no password is ever stored by this tool).
-2. **Full Disk Access** for the app that runs photos-tool (Terminal, or the menu-bar
-   app), in System Settings → Privacy & Security. Quit and relaunch it after.
+2. **Full Disk Access** for the app that runs photos-tool — `photos-tool.app` for the
+   menu-bar app (Terminal for the CLI) — in System Settings → Privacy & Security.
+   Quit and relaunch it after.
 3. **Download Originals to this Mac** (Photos → Settings → iCloud) and let it finish,
    so you don't export low-res placeholders.
+
+The menu-bar app then asks for two more grants the first time it needs them, each via
+macOS's own prompt and keyed to the app (so the osxphotos children inherit them):
+**Automation → Photos** (the *"photos-tool" wants to control "Photos"* prompt) on the
+first **Send Selected**, so it can read which photos you picked, and **Photos** on the
+first **Clean up**, for the recoverable delete. The app declares
+`NSAppleEventsUsageDescription`, without which macOS silently refuses the first grant.
 
 Then `photos-tool doctor` should be all green.
 
@@ -147,7 +155,11 @@ environment `pypi`) before the first tag.
 - [x] Opt-in Mac-side cleanup (move exported originals to Recently Deleted).
 - [x] 📷 menu-bar app; macOS Shortcut + hotkey; documented manual smoke test.
 - [x] PyPI Trusted-Publishing release + clean-install CI.
-- [ ] Signed/notarized `.app` bundle of the menu-bar app.
+- [x] No-Terminal `.app` bundle of the menu-bar app (PyInstaller, ad-hoc signed;
+      `scripts/build-app.sh`). Self-reinvokes so osxphotos/PhotoKit run under the app's
+      own TCC identity; declares the Photos/Automation usage descriptions.
+- [ ] Stable-signed (self-signed cert) `.app` so the macOS grants survive rebuilds
+      instead of re-prompting on each reinstall.
 
 ## License
 

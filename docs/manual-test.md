@@ -5,10 +5,19 @@ This is the only layer that needs a real Photos library, Full Disk Access, and t
 ## One-time Mac setup
 
 1. Connect to the SMB share in Finder and save the password in Keychain.
-2. Grant Full Disk Access to the app that launches `photos-tool`, usually Terminal.app or Shortcuts. Quit and relaunch it.
-3. In Photos -> Settings -> iCloud, choose "Download Originals to this Mac" and let it finish before relying on exports.
-4. Approve the first Automation prompt if `osxphotos --download-missing` asks to control Photos.
-5. Be aware that on macOS 26, `osxphotos` may not read Shared Albums yet; use local library items for this smoke test.
+2. Grant Full Disk Access to the app that launches `photos-tool` — `photos-tool.app` for the
+   menu-bar bundle (Terminal.app/Shortcuts for the CLI). Quit and relaunch it.
+3. In Photos -> Settings -> iCloud, choose "Download Originals to this Mac" and let it finish
+   before relying on exports.
+4. **Automation -> Photos:** the first **Send Selected Photos** pops *"photos-tool" wants to
+   control "Photos"* — click **Allow** (this is what lets it read your live selection; the
+   `.app` declares `NSAppleEventsUsageDescription`, without which macOS silently refuses it
+   and the selection always reads empty). The prompt can land on a *secondary monitor*.
+5. **Photos:** the first **Clean up last backup** asks for Photos access (the recoverable
+   delete). Both grants are keyed to the bundle id, so the osxphotos children inherit them.
+6. Be aware that on macOS 26, `osxphotos` may not read Shared Albums yet; use local library
+   items for this smoke test. (Repeated shell-launched `osxphotos query --selected` can also
+   deadlock Photos' AppleEvent handler — the menu-bar/LaunchServices path does not.)
 
 ## Shortcut trigger
 
