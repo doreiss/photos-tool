@@ -240,3 +240,42 @@ def test_reveal_rechecks_each_file_not_just_the_removable_set(tmp_path: Path):
     assert set(removable) == {"ua", "ub"}
     a.write_text("aaaa-changed", encoding="utf-8")  # changes AFTER removable was computed
     assert state.reveal_paths(token, set(removable)) == [str(b)]
+
+
+def test_fingerprint_hashes_whole_file_under_threshold(tmp_path):
+    # A file bigger than head+tail (the old hash's blind spot) but under WHOLE_FILE_MAX is now
+    # hashed in FULL: a single middle-byte change is caught even with size + mtime preserved.
+    import os
+
+    f = tmp_path / "clip.mov"
+    data = bytearray(b"\x00" * (state.HASH_SPAN * 4))  # 256 KiB: > head+tail, < WHOLE_FILE_MAX
+    f.write_bytes(bytes(data))
+    size, mtime_ns, content = state._fingerprint(f)
+    bf = state.BackupFile(str(f), size, mtime_ns, content)
+    assert state._matches(bf)
+
+    data[len(data) // 2] ^= 0xFF  # flip one MIDDLE byte (a head+tail hash would miss this)
+    f.write_bytes(bytes(data))
+    os.utime(f, ns=(mtime_ns, mtime_ns))  # restore mtime: only the interior content differs
+    assert not state._matches(bf)
+
+
+def test_fingerprint_samples_interior_windows_of_large_files(tmp_path):
+    # Above WHOLE_FILE_MAX the file is sampled, but at interior windows (not just head+tail): a
+    # corruption in a middle window — same size, same mtime — is now caught.
+    import os
+
+    f = tmp_path / "big.mov"
+    size = state.WHOLE_FILE_MAX + state.HASH_SPAN * 8
+    f.write_bytes(b"\x00" * size)
+    s, mtime_ns, content = state._fingerprint(f)
+    bf = state.BackupFile(str(f), s, mtime_ns, content)
+    assert state._matches(bf)
+
+    last = size - state.HASH_SPAN
+    interior_offset = last * 2 // (state.INTERIOR_SAMPLES + 1)  # inside a sampled middle window
+    with open(f, "r+b") as fh:
+        fh.seek(interior_offset + 128)
+        fh.write(b"\xff")
+    os.utime(f, ns=(mtime_ns, mtime_ns))
+    assert not state._matches(bf)

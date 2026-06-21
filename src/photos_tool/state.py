@@ -27,15 +27,20 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Bumped 1 -> 2 for the content-addressed token. A v1 token (bare (path,size)
-# tuples) is read as "no pending backup" (load returns None) so its originals are
-# never offered for deletion — the safe direction; the user just re-runs send.
-SCHEMA_VERSION = 2
+# 1 -> 2 added the content-addressed token; 2 -> 3 widened the fingerprint to hash the WHOLE
+# file under WHOLE_FILE_MAX and to sample interior windows above it (closing the head/tail-only
+# "middle blind spot"). An older-schema token is read as "no pending backup" (load returns None)
+# so its originals are never offered for deletion — the safe direction; the user re-runs send.
+SCHEMA_VERSION = 3
 
-# Hash the first and last 64 KiB of each file (<=128 KiB read regardless of size):
-# catches truncation, same-size overwrites, and boundary-block corruption without
-# re-hashing tens of GB of video over SMB at both save and cleanup.
+# Fingerprint strategy. Photos and short clips (the overwhelming majority) are hashed in FULL —
+# no blind spot at all. Only files larger than this are sampled (hashing tens of GB of video over
+# SMB twice — at save and at cleanup — would be unworkable), and even then we read the head, the
+# tail, and several deterministic interior windows so a same-size, same-mtime middle corruption
+# no longer slips through unseen. _matches still checks size and mtime_ns separately.
 HASH_SPAN = 64 * 1024
+WHOLE_FILE_MAX = 16 * 1024 * 1024  # hash the entire file at/under 16 MiB
+INTERIOR_SAMPLES = 4  # interior HASH_SPAN windows for larger files (besides head + tail)
 
 
 @dataclass(frozen=True)
@@ -97,12 +102,15 @@ def atomic_write_json(path: Path, payload: object) -> None:
 
 
 def _fingerprint(path: Path) -> tuple[int, int, str]:
-    """Content fingerprint of a landed copy: (size, mtime_ns, sha256 of head+tail).
+    """Content fingerprint of a landed copy: (size, mtime_ns, sha256 of its content).
 
-    Raises ``OSError`` if the path is absent or not a regular file, and ``ValueError``
-    for an empty (0-byte) file — so an empty copy is NEVER recorded as a backup and
-    can never authorize a deletion (the README's "present and non-empty" promise,
-    enforced rather than documented).
+    Files at/under ``WHOLE_FILE_MAX`` are hashed in full; larger files are sampled at the head,
+    the tail, and ``INTERIOR_SAMPLES`` deterministic interior windows (offsets derived purely
+    from ``size``, so save-time and cleanup-time fingerprints are always comparable).
+
+    Raises ``OSError`` if the path is absent or not a regular file, and ``ValueError`` for an
+    empty (0-byte) file — so an empty copy is NEVER recorded as a backup and can never authorize
+    a deletion (the README's "present and non-empty" promise, enforced rather than documented).
     """
     st = path.stat()  # OSError if absent
     if not stat.S_ISREG(st.st_mode):
@@ -112,11 +120,18 @@ def _fingerprint(path: Path) -> tuple[int, int, str]:
         raise ValueError(f"refusing to record an empty file: {path}")
     hasher = hashlib.sha256()
     with path.open("rb") as fh:
-        head = fh.read(HASH_SPAN)
-        hasher.update(head)
-        if size > HASH_SPAN:
-            fh.seek(max(size - HASH_SPAN, len(head)))  # no overlap with head
-            hasher.update(fh.read(HASH_SPAN))
+        if size <= WHOLE_FILE_MAX:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        else:
+            # head, INTERIOR_SAMPLES interior windows, tail — evenly spaced across the file at
+            # offsets that depend only on `size`, so the same windows are read every time.
+            windows = INTERIOR_SAMPLES + 2
+            last = size - HASH_SPAN
+            for i in range(windows):
+                offset = min(last * i // (windows - 1), last)
+                fh.seek(offset)
+                hasher.update(fh.read(HASH_SPAN))
     return size, st.st_mtime_ns, hasher.hexdigest()
 
 
