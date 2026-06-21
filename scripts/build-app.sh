@@ -96,18 +96,23 @@ fi
 
 echo "==> Verifying signature + bundle shape"
 codesign --verify --deep --strict --verbose=2 "$APP"
-if codesign -dv --verbose=2 "$APP" 2>&1 | grep -q "Identifier=$BUNDLE_ID"; then
-  echo "  signed as $BUNDLE_ID"
-else
-  echo "  WARNING: signed identifier is not $BUNDLE_ID" >&2
-fi
+# Capture each codesign output to a variable (runs to completion) then test the string. Piping
+# `codesign -dv ... | grep -q` lets grep close the pipe early; codesign then takes SIGPIPE and,
+# under `set -o pipefail`, the whole `if` flips to the wrong branch (a bogus identifier warning).
+sig_info="$(codesign -dv --verbose=2 "$APP" 2>&1)"
+case "$sig_info" in
+  *"Identifier=$BUNDLE_ID"*) echo "  signed as $BUNDLE_ID" ;;
+  *) echo "  WARNING: signed identifier is not $BUNDLE_ID" >&2 ;;
+esac
 if [ "$SIGNED_STABLE" = "1" ]; then
-  if codesign -d -r- "$APP" 2>&1 | grep -q "identifier \"$BUNDLE_ID\" and certificate leaf"; then
-    echo "  designated requirement is identifier+leaf (TCC grants persist across rebuilds)"
-  else
-    echo "ERROR: DR is not identifier+leaf — grants would not persist; check the cert" >&2
-    exit 1
-  fi
+  dr_info="$(codesign -d -r- "$APP" 2>&1)"
+  case "$dr_info" in
+    *"identifier \"$BUNDLE_ID\" and certificate leaf"*)
+      echo "  designated requirement is identifier+leaf (TCC grants persist across rebuilds)" ;;
+    *)
+      echo "ERROR: DR is not identifier+leaf — grants would not persist; check the cert" >&2
+      exit 1 ;;
+  esac
 fi
 EXE="$APP/Contents/MacOS/photos-tool"
 if ! file "$EXE" | grep -q "Mach-O"; then
