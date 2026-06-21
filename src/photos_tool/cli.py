@@ -1076,6 +1076,7 @@ def _status_message(exit_code: int) -> str:
         EXIT_OK: "All selected photos sent.",
         EXIT_PREFLIGHT: "Send failed before exporting; run photos-tool doctor.",
         EXIT_RECONCILE: "Some photos were skipped (often iCloud cloud-only originals).",
+        EXIT_UNVERIFIED: "Some photos did not reach the share; not confirmed backed up.",
         EXIT_NOTHING_SELECTED: "Nothing was selected.",
         EXIT_CONVERSION: "Photos sent, but a compatibility (JPEG/MP4) copy failed.",
     }.get(exit_code, f"Send ended with code {exit_code}.")
