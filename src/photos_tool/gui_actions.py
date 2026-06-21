@@ -16,6 +16,7 @@ from .cli import (
     EXIT_OK,
     EXIT_PREFLIGHT,
     EXIT_RECONCILE,
+    EXIT_UNVERIFIED,
     EXIT_USAGE,
 )
 
@@ -69,6 +70,10 @@ _MESSAGES = {
     EXIT_OK: Notification("Photos sent", "Backup complete."),
     EXIT_RECONCILE: Notification(
         "Some photos were skipped", "Turn on iCloud 'Download Originals' and try again."
+    ),
+    EXIT_UNVERIFIED: Notification(
+        "Not fully backed up",
+        "Some photos didn't reach the share. Check it's connected, then send again.",
     ),
     EXIT_NOTHING_SELECTED: Notification("Nothing selected", "Pick photos in Photos first."),
     EXIT_CONVERSION: Notification(

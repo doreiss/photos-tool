@@ -55,6 +55,11 @@ def _osxphotos(scenario: dict) -> int:
             report_path.write_text("{not-json", encoding="utf-8")
         else:
             report = _pick_report(scenario, destination, dry_run)
+            if not dry_run and destination.name != "compat":
+                # Land each exported/already-present originals row as a real file on the share
+                # and point the row at it, so the report agrees with what is on disk — the delete
+                # gate re-fingerprints those bytes, and send now demotes if they are absent.
+                _materialize(report, destination)
             report_path.write_text(json.dumps(report), encoding="utf-8")
         if not dry_run:
             only_photos = "--only-photos" in args
@@ -93,6 +98,34 @@ def _pick_report(scenario: dict, destination: Path, dry_run: bool) -> list[dict]
         }
         for rel in _pick_files(scenario, destination)
     ]
+
+
+def _materialize(report: list[dict], destination: Path) -> None:
+    """Write a real non-empty file for each exported/already-present originals row and rewrite
+    its filename to that path, so the fake report agrees with disk. Rows that are missing/error
+    or have an empty filename are left untouched (no copy on the share) — exactly the cases the
+    delete gate must drop and `send` must now treat as not-fully-backed-up.
+    """
+    for r in report:
+        filename = r.get("filename")
+        if not filename or r.get("missing") or r.get("error"):
+            continue
+        if not (r.get("exported") or r.get("skipped")):
+            continue
+        path = Path(filename)
+        try:
+            under_destination = path.is_relative_to(destination)
+        except ValueError:
+            under_destination = False
+        if under_destination:
+            # Already a real share path: whether it lands is governed by scenario["files"]
+            # (so a test can deliberately keep a constituent OFF the share). Leave it to the
+            # _pick_files loop; do not force it to exist here.
+            continue
+        path = destination / path.name  # a synthetic /fake/... row -> relocate onto the share
+        r["filename"] = str(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fake", encoding="utf-8")
 
 
 def _pick_files(scenario: dict, destination: Path) -> list[str]:

@@ -45,6 +45,7 @@ def test_map_exit_code_covers_every_known_code():
         cli.EXIT_PREFLIGHT,
         cli.EXIT_USAGE,
         cli.EXIT_RECONCILE,
+        cli.EXIT_UNVERIFIED,
         cli.EXIT_NOTHING_SELECTED,
         cli.EXIT_CONVERSION,
     ):

@@ -55,6 +55,11 @@ EXIT_USAGE = 2
 EXIT_RECONCILE = 3
 EXIT_NOTHING_SELECTED = 4
 EXIT_CONVERSION = 5
+# osxphotos reported the assets as exported, but re-fingerprinting the share found one or more
+# copies absent/empty/changed (e.g. a stale export DB + a wiped/restored share makes --update
+# write nothing yet emit "skipped" rows). The originals are NOT confirmed on the share, so the
+# send is NOT a clean success — distinct from EXIT_RECONCILE (Photos itself skipped/lost rows).
+EXIT_UNVERIFIED = 6
 
 
 def _cmd_check(_args: argparse.Namespace) -> int:
@@ -260,7 +265,6 @@ def _cmd_send(args: argparse.Namespace) -> int:
             )
             return EXIT_PREFLIGHT
 
-        _print_summary(destination, selected, report, reconciliation.message)
         _warn_report_shape(report)
 
         jpeg_report: ReportSummary | None = None
@@ -330,7 +334,27 @@ def _cmd_send(args: argparse.Namespace) -> int:
                 )
                 return EXIT_CONVERSION
 
-        exit_code = EXIT_OK if reconciliation.ok else EXIT_RECONCILE
+        # Re-fingerprint every reconciled copy on the share BEFORE declaring success and writing
+        # the run log: osxphotos counting a row as exported is not proof the bytes landed (a stale
+        # export DB + a wiped/restored share makes --update emit "skipped" rows while writing
+        # nothing). save_backup_token records ONLY share-verified copies and returns the assets it
+        # had to drop; a non-empty drop on an otherwise-clean reconcile means the originals are not
+        # confirmed on the share, so "Backup complete" would be a lie -> demote to EXIT_UNVERIFIED.
+        # This also keeps the token (which cleanup trusts) recording exactly the verified subset.
+        unverified: list[tuple[str, str]] = []
+        if reconciliation.ok and report.exported_paths:
+            unverified = state.save_backup_token(
+                log_dir, destination, config.destination.smb_url, report.exported_paths
+            )
+
+        if not reconciliation.ok:
+            exit_code = EXIT_RECONCILE
+        elif unverified:
+            exit_code = EXIT_UNVERIFIED
+        else:
+            exit_code = EXIT_OK
+
+        _print_summary(destination, selected, report, reconciliation.message, unverified=unverified)
         _write_run_log(
             log_dir,
             started=started,
@@ -345,20 +369,6 @@ def _cmd_send(args: argparse.Namespace) -> int:
             exiftool_error=report.exiftool_error,
             exiftool_warning=report.exiftool_warning,
         )
-
-        # Record this batch (content-fingerprinting each landed copy) so cleanup-last can
-        # later remove exactly these originals — never automatically, always a separate step.
-        if exit_code == EXIT_OK and report.exported_paths:
-            skipped = state.save_backup_token(
-                log_dir, destination, config.destination.smb_url, report.exported_paths
-            )
-            if skipped:
-                print(
-                    f"Note: {len(skipped)} photo(s) could not be fully verified on the share and "
-                    "will NOT be offered for cleanup; re-run send once the share is healthy.",
-                    file=sys.stderr,
-                )
-
         return exit_code
 
 
@@ -1016,6 +1026,7 @@ def _print_summary(
     report: ReportSummary,
     message: str,
     *,
+    unverified: list[tuple[str, str]] | None = None,
     dry_run: bool = False,
 ) -> None:
     prefix = "Dry run: " if dry_run else ""
@@ -1028,6 +1039,16 @@ def _print_summary(
         f"{report.missing} missing, {report.error} error."
     )
     print(f"Selected assets: {selected}")
+    if unverified:
+        # The osxphotos report counted these as exported, but their bytes were not found on the
+        # share — NOT a clean backup. They are excluded from the cleanup token, so their originals
+        # are never offered for deletion; re-run send once the share is healthy.
+        print(
+            f"NOT fully backed up: {len(unverified)} photo(s) the report counted as exported are "
+            "missing/empty/changed on the share. They will NOT be offered for cleanup — re-run "
+            "send once the share is reachable and writable.",
+            file=sys.stderr,
+        )
     if report.exiftool_error or report.exiftool_warning:
         print(
             f"Note: metadata embedding reported {report.exiftool_error} error(s) and "

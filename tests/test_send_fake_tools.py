@@ -210,9 +210,42 @@ def test_send_exits_three_when_report_has_missing_rows(tmp_path: Path, fake_tool
 
     assert rc == 3
     assert "Optimize Mac Storage" in captured.out
+    # A non-clean reconcile must arm NO cleanup, even though asset-1 genuinely exported: a later
+    # cleanup-last could otherwise delete originals from a batch the user was told to re-send.
+    from photos_tool import state
+
+    assert state.load_backup_token(tmp_path / "state" / "logs", mount) is None
+
+
+def test_send_reports_unverified_when_reconciled_copies_are_absent_on_share(
+    tmp_path: Path, fake_tools, capsys
+):
+    # The flagship "misleading success": a stale export DB + a wiped/restored share makes
+    # --update write nothing yet report the asset as "skipped" (== already present), so reconcile
+    # would say OK. send must re-fingerprint the share, find the copy gone, and report NOT-fully-
+    # backed-up (EXIT_UNVERIFIED) with no token -- never a false "Backup complete."
+    from photos_tool import state
+
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)
+    skipped_absent = {
+        **row("a", exported=False, new=False, skipped=True),
+        "filename": str(mount / "2024/01/a.heic"),
+    }
+    fake_tools(scenario(mount, selected=1, report=[skipped_absent], files=[]))  # nothing landed
+
+    rc = cli.main(["send", "--config", str(config)])
+    assert rc == cli.EXIT_UNVERIFIED
+    assert "NOT fully backed up" in capsys.readouterr().err
+    # The token records only share-verified copies (none here), so cleanup offers nothing.
+    token = state.load_backup_token(tmp_path / "state" / "logs", mount)
+    assert token is not None and token.assets == ()
 
 
 def test_send_exits_three_when_report_has_error_rows(tmp_path: Path, fake_tools):
+    from photos_tool import state
+
     mount = tmp_path / "share"
     mount.mkdir()
     config = write_config(tmp_path, mount)
@@ -225,6 +258,7 @@ def test_send_exits_three_when_report_has_error_rows(tmp_path: Path, fake_tools)
     )
 
     assert cli.main(["send", "--config", str(config)]) == 3
+    assert state.load_backup_token(tmp_path / "state" / "logs", mount) is None
 
 
 def test_send_exiftool_error_does_not_exit_three(tmp_path: Path, fake_tools, capsys):
@@ -531,6 +565,11 @@ def test_send_mp4_conversion_error_exits_five(tmp_path: Path, fake_tools, capsys
 
     assert rc == 5
     assert "conversion error" in captured.err
+    # A conversion failure exits before the token is recorded, so cleanup is never armed for a
+    # run the user must re-do (the safe direction: originals are kept until a clean send).
+    from photos_tool import state
+
+    assert state.load_backup_token(tmp_path / "state" / "logs", mount) is None
 
 
 def test_send_album_typo_reports_album_specific_message(tmp_path: Path, fake_tools, capsys):
@@ -630,8 +669,10 @@ def test_send_warns_and_drops_a_partial_live_photo(tmp_path: Path, fake_tools, c
         )
     )
 
-    assert cli.main(["send", "--config", str(config)]) == 0
-    assert "could not be fully verified" in capsys.readouterr().err
+    # The MOV is absent on the share, so this is NOT a clean backup: the whole Live Photo is
+    # dropped from the token AND the send reports it (no false "Backup complete").
+    assert cli.main(["send", "--config", str(config)]) == cli.EXIT_UNVERIFIED
+    assert "NOT fully backed up" in capsys.readouterr().err
 
     token = state.load_backup_token(tmp_path / "state" / "logs", mount)
     assert token is not None and token.assets == ()  # whole Live Photo dropped
@@ -679,8 +720,10 @@ def test_send_drops_asset_with_an_empty_filename_constituent(tmp_path: Path, fak
     ]
     fake_tools(scenario(mount, selected=1, report=rows, files=[heic]))
 
-    assert cli.main(["send", "--config", str(config)]) == 0
-    assert "could not be fully verified" in capsys.readouterr().err
+    # The empty-filename constituent can't be verified -> whole asset dropped AND the send is
+    # reported as not fully backed up (not a silent "complete").
+    assert cli.main(["send", "--config", str(config)]) == cli.EXIT_UNVERIFIED
+    assert "NOT fully backed up" in capsys.readouterr().err
     token = state.load_backup_token(tmp_path / "state" / "logs", mount)
     assert token is not None and token.assets == ()
 
@@ -949,6 +992,32 @@ def test_cleanup_last_removes_then_clears_token(tmp_path, fake_tools, monkeypatc
     assert "Moved 1 original(s) to Recently Deleted" in captured.out
     # The token is consumed, so the same batch can never be offered for deletion again.
     assert state.load_backup_token(tmp_path / "state" / "logs", mount) is None
+
+
+def test_cleanup_last_refuses_without_yes_when_non_interactive(
+    tmp_path, fake_tools, monkeypatch, capsys
+):
+    # The one destructive command must NOT delete when run without a tty (a Shortcut, cron, or
+    # the menu-bar worker) unless --yes is explicit. The gate guards remove_originals entirely.
+    import io
+
+    from photos_tool import state
+
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = _record_a_backup(tmp_path, mount, fake_tools)  # arms a real, removable token
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO())  # isatty() -> False (non-interactive)
+
+    def fake_remove(*args, **kwargs):
+        raise AssertionError("remove_originals must not run without --yes on a non-tty")
+
+    monkeypatch.setattr(cli, "remove_originals", fake_remove)
+
+    rc = cli.main(["cleanup-last", "--config", str(config)])  # no --yes
+    assert rc == cli.EXIT_USAGE
+    assert "--yes" in capsys.readouterr().err
+    # The token is untouched, so a later interactive run can still offer the same batch.
+    assert state.load_backup_token(tmp_path / "state" / "logs", mount) is not None
 
 
 def test_cleanup_last_without_a_recorded_backup_errors(tmp_path: Path, capsys):
