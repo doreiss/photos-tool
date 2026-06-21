@@ -452,6 +452,11 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
 
         @rumps.clicked("Run Diagnostics")
         def diagnostics(self, _: Any) -> None:
+            # Request the Automation->Photos grant first (from this UI process, which CAN present
+            # the prompt). Otherwise the doctor's "Photos selection readable" probe runs as a
+            # subprocess that can't prompt and just hangs the 60s timeout. Status is advisory —
+            # the doctor reports the result either way; we only need the prompt to have appeared.
+            request_photos_automation()
             self._start("doctor")
 
         @rumps.clicked("Set up connection…")
