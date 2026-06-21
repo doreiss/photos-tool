@@ -12,6 +12,12 @@ on:
 
 permissions: {}
 
+# Two tags in quick succession would otherwise race two publishes (PyPI rejects the dup,
+# but the failure is noisy). Don't cancel an in-flight publish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Build sdist + wheel
@@ -48,4 +54,6 @@ jobs:
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      # SHA-pinned (not the moving @release/v1 branch): this is the one job holding
+      # id-token:write + PyPI publish rights. Dependabot bumps the SHA via the comment.
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0

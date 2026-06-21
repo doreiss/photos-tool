@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # Bumps the SHA-pinned credential-holding action in release.yml and surfaces advisories
+  # for the @v5/@v4 well-known-org actions in ci.yml.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
