@@ -31,6 +31,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,7 @@ from .gui_actions import (
     parse_connect_result,
     send_action_for_automation_status,
     status_glyph,
+    working_title,
 )
 
 
@@ -341,6 +343,7 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
             # Threading: a single daemon worker drains a job queue; results come
             # back on a results queue that ONLY the Timer (main thread) reads.
             self._busy = False
+            self._job_started: float | None = None  # set while a job runs; drives the m:ss clock
             # The title to return to once a job finishes: the last send result glyph
             # (or plain idle before any send). Non-send jobs restore this rather than
             # leaving the working glyph stuck on.
@@ -368,6 +371,7 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
                 rumps.alert("Please wait", "A job is already running.")
                 return False
             self._busy = True
+            self._job_started = time.monotonic()  # _drain renders a live m:ss clock from this
             self.title = WORKING_GLYPH
             job: dict[str, Any] = {"kind": kind}
             job.update(payload)
@@ -494,6 +498,10 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
 
         def _drain(self, _timer: Any) -> None:
             """Sole place that touches rumps UI from queue results (main thread)."""
+            # While a job runs, tick a live m:ss clock so a multi-hour send never looks hung.
+            # Gated on _busy so it never clobbers the result/idle glyph once the job finishes.
+            if self._busy and self._job_started is not None:
+                self.title = working_title(time.monotonic() - self._job_started)
             if not self._configured and not self._welcomed:
                 self._welcomed = True
                 if (

@@ -269,3 +269,14 @@ def test_connect_success_message_surfaces_full_disk_access():
     note = connect_success_message("/Volumes/Share/MacA")
     assert "/Volumes/Share/MacA" in note.message
     assert "Full Disk Access" in note.message
+
+
+def test_working_title_formats_elapsed_clock():
+    # A live m:ss clock is what makes a multi-hour send look alive rather than hung.
+    from photos_tool.gui_actions import WORKING_GLYPH, working_title
+
+    assert working_title(0) == f"{WORKING_GLYPH} 0:00"
+    assert working_title(5) == f"{WORKING_GLYPH} 0:05"
+    assert working_title(65) == f"{WORKING_GLYPH} 1:05"
+    assert working_title(3725) == f"{WORKING_GLYPH} 62:05"  # past an hour: minutes keep counting
+    assert working_title(-3) == f"{WORKING_GLYPH} 0:00"  # clamps a negative clock to zero

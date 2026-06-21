@@ -98,6 +98,17 @@ IDLE_GLYPH = "📷"  # nothing running; also the "no send yet" resting state
 WORKING_GLYPH = "📷…"  # a job is in flight
 
 
+def working_title(elapsed_seconds: float) -> str:
+    """Working glyph plus an ``m:ss`` elapsed clock for the in-flight job.
+
+    A 100GB first send can run for hours while the worker blocks in ``subprocess.run``;
+    a frozen glyph reads as "hung" and tempts a force-quit (wasteful, though safe and
+    resumable). A ticking clock shows it is alive. Clamps negatives to zero.
+    """
+    total = int(elapsed_seconds) if elapsed_seconds > 0 else 0
+    return f"{WORKING_GLYPH} {total // 60}:{total % 60:02d}"
+
+
 def status_glyph(code: int | None) -> str:
     """Menu-bar title glyph for the last send result (``None`` == launch error)."""
     if code is None:
