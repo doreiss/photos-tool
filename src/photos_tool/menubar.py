@@ -122,6 +122,10 @@ def _acquire_single_instance_lock():
 # persists in TCC and the osxphotos children inherit it; a later revocation just degrades to a
 # graceful "nothing selected" on the next send (osxphotos can't read a denied selection).
 _AUTOMATION_GRANTED = False
+# True while a consent prompt is up: the 0.5s run-loop spin below processes events, so a second
+# "Send Selected" click could re-enter this function and double-flip the activation policy. Guard
+# against that re-entry rather than stacking a second prompt.
+_CONSENT_IN_FLIGHT = False
 
 
 def request_photos_automation() -> int | None:
@@ -146,9 +150,12 @@ def request_photos_automation() -> int | None:
       * ``AEDeterminePermissionToAutomateTarget`` (Apple's purpose-built prompt trigger) returns
         an actionable status, where a fire-and-forget AppleScript send just no-ops.
     """
-    global _AUTOMATION_GRANTED
+    global _AUTOMATION_GRANTED, _CONSENT_IN_FLIGHT
     if _AUTOMATION_GRANTED:
         return 0  # already granted this session: fast path, no activation dance, no wait
+    if _CONSENT_IN_FLIGHT:
+        return None  # a prompt is already up (re-entrant click during the run-loop spin)
+    _CONSENT_IN_FLIGHT = True
     try:
         import ctypes
         import threading
@@ -220,6 +227,8 @@ def request_photos_automation() -> int | None:
     except Exception as exc:  # never crash the caller
         print(f"photos-tool: could not request Photos automation consent: {exc}", file=sys.stderr)
         return None
+    finally:
+        _CONSENT_IN_FLIGHT = False
 
 
 def _maybe_dispatch_reinvocation(argv: list[str]) -> int | None:

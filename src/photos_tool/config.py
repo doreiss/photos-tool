@@ -224,3 +224,9 @@ def validate_smb_url(value: str) -> None:
         raise ConfigError("destination.smb_url must look like smb://server/Share")
     if parsed.username or parsed.password or "@" in parsed.netloc:
         raise ConfigError("destination.smb_url must not contain credentials")
+    # Reject path-traversal / control-char share segments (e.g. smb://host/../evil): the share
+    # name flows into the derived mount point, so a "." or ".." segment could point /Volumes/..
+    # at the wrong directory. (The first segment is the SMB share itself, parsed correctly.)
+    for segment in parsed.path.split("/"):
+        if segment in {".", ".."} or any(ch < " " for ch in segment):
+            raise ConfigError("destination.smb_url has an invalid share path segment")

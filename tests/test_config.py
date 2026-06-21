@@ -75,6 +75,14 @@ def test_config_rejects_smb_url_with_credentials(tmp_path: Path):
         load_config(path)
 
 
+def test_config_rejects_smb_url_path_traversal(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_text('[destination]\nsmb_url = "smb://pc/../evil"\n', encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="invalid share path segment"):
+        load_config(path)
+
+
 def test_config_rejects_non_smb_url(tmp_path: Path):
     path = tmp_path / "config.toml"
     path.write_text('[destination]\nsmb_url = "https://pc/FamilyPhotos"\n', encoding="utf-8")
