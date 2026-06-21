@@ -1,5 +1,10 @@
 # No-Terminal app delivery — empirical findings (for the research workflow)
 
+> **RESOLVED.** This research shipped: the delivery is a PyInstaller `--windowed` `.app` built by
+> [`scripts/build-app.sh`](../scripts/build-app.sh) from [`packaging/`](../packaging), signed with
+> a stable self-signed identity, bundling its own exiftool. Install + onboarding:
+> [docs/app-install.md](app-install.md). The findings below are kept as the rationale.
+
 GOAL: a non-technical family member runs the photos-tool **menu-bar app without ever using a Terminal**,
 with all of these working:
 1. the 📷 **status-bar item appears** reliably,

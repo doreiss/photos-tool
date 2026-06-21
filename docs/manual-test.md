@@ -46,6 +46,7 @@ Expected exit codes:
 | 3 | export ran but some assets were skipped or errored |
 | 4 | nothing selected |
 | 5 | a compatibility copy (JPEG or MP4) failed after the originals exported |
+| 6 | osxphotos reported the export, but re-verifying the share found copies missing/empty/changed — originals are NOT confirmed on the share (not a clean success) |
 
 ## Test album
 

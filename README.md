@@ -42,10 +42,26 @@ The optional `compat/` tree (enable JPEG/MP4 copies in config) is a fully Window
 JPEG for every still, H.264 MP4 for every standalone video, no HEVC `.mov` — so a
 Windows PC with no codecs can browse `compat/` while the main tree stays original.
 
-## Install (each family Mac)
+## Install
+
+### A. Family Mac — the no-Terminal `.app` (recommended)
+
+The menu-bar `.app` **bundles its own exiftool** (so it needs no Homebrew) and self-reinvokes its
+own signed binary. Build + sign + install it with the stable signing identity so the macOS grants
+persist across rebuilds — full steps in **[docs/app-install.md](docs/app-install.md)**:
 
 ```bash
-brew install exiftool          # required (metadata); add ffmpeg for MP4 copies:
+./packaging/create-codesign-cert.sh   # once, so grants persist across rebuilds
+./scripts/build-app.sh --install      # bundles exiftool, signs, installs to /Applications
+```
+
+ffmpeg is optional (only for compatibility MP4 copies); install it with `brew install ffmpeg` if
+you want those.
+
+### B. Developer / CLI (pip / uv)
+
+```bash
+brew install exiftool          # required for the CLI path (the .app bundles its own)
 brew install ffmpeg            # optional, only for MP4 video copies
 
 uv tool install photos-tool                 # recommended (or: pipx install photos-tool)

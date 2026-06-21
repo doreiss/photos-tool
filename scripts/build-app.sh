@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# Build, ad-hoc sign, and verify the no-Terminal photos-tool menu-bar .app via PyInstaller.
-# Run from anywhere:  ./scripts/build-app.sh [--install]
+# Build, sign (stable self-signed cert or ad-hoc), and verify the no-Terminal photos-tool
+# menu-bar .app via PyInstaller. Run from anywhere:  ./scripts/build-app.sh [--install]
 #   --install   also copy the built app to /Applications
 #
 # The frozen app is one signed binary that self-reinvokes (--pyi-cli / --pyi-osxphotos), so
-# osxphotos and the PhotoKit delete run inside the app's own code signature (clean
-# "photos-tool" TCC identity). Ad-hoc signing has no Apple certificate: `spctl -a -vv` will
-# report REJECTED and the first launch needs a one-time right-click > Open. (Standalone py2app
-# was rejected — it can't bundle osxphotos's ~90-package tree; see docs/app-delivery-findings.md.)
+# osxphotos and the PhotoKit delete run inside the app's own code signature (clean "photos-tool"
+# TCC identity). It signs with the stable "photos-tool Self-Signed" identity when present (run
+# packaging/create-codesign-cert.sh once) so the macOS grants persist across rebuilds; otherwise
+# it ad-hoc signs (grants re-prompt each rebuild). EITHER WAY the build is un-notarized, so
+# `spctl -a -vv` reports REJECTED and the first launch needs a one-time right-click > Open.
+# (Standalone py2app was rejected — it can't bundle osxphotos's ~90-package tree; see
+# docs/app-delivery-findings.md.)
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
