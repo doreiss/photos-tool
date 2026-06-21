@@ -34,15 +34,23 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from .config import DEFAULT_STATE_DIR
+from ._frozen import is_pyinstaller_bundle
+from .config import DEFAULT_STATE_DIR, default_config_path
 from .gui_actions import (
     IDLE_GLYPH,
+    SETUP_PROMPT_TEXT,
+    SETUP_PROMPT_TITLE,
     WORKING_GLYPH,
+    build_connect_argv,
     build_send_argv,
     confirm_delete_message,
     confirm_reveal_message,
+    connect_failure_message,
+    connect_success_message,
     map_exit_code,
     parse_cleanup_query,
+    parse_connect_result,
+    send_action_for_automation_status,
     status_glyph,
 )
 
@@ -50,37 +58,19 @@ from .gui_actions import (
 def _cli_prefix() -> list[str]:
     """The argv prefix used to run the photos-tool CLI, as a list.
 
-    Frozen (py2app .app): the bundle's OWN embedded framework interpreter running
-    ``-m photos_tool``, so the osxphotos export and the PhotoKit delete are done by a
-    binary inside the app's code signature and TCC attributes Photos to the app (the
-    prompt reads "photos-tool", the grant is reused). NOTE: under py2app ``sys.executable``
-    is the app *stub* — running it would re-launch this menu-bar app — so we must locate
-    the real framework interpreter and never fall back to the stub.
+    Frozen PyInstaller .app: re-invoke the app's OWN signed binary with a ``--pyi-cli``
+    sentinel (main() dispatches on it), so the osxphotos export and the PhotoKit delete run
+    inside the app's code signature — macOS attributes Photos to the app (the prompt reads
+    "photos-tool", the grant is reused).
 
-    Dev/CI: the sibling ``photos-tool`` console script in the venv (today's behaviour),
-    returned as a one-element list so callers always splat ``[*prefix, subcmd, ...]``.
+    Dev/CI: the sibling ``photos-tool`` console script in the venv, returned as a one-element
+    list so callers always splat ``[*prefix, subcmd, ...]``.
     """
-    is_frozen = getattr(sys, "frozen", False) or ".app/Contents/" in sys.executable
-    if is_frozen:
-        stub = Path(sys.executable).resolve()
-        macos_dir = stub.parent  # .../Contents/MacOS
-        contents = macos_dir.parent  # .../Contents
-        ver = f"{sys.version_info.major}.{sys.version_info.minor}"  # e.g. 3.11
-        fw_bin = contents / "Frameworks" / "Python.framework" / "Versions" / ver / "bin"
-        candidates = [
-            fw_bin / f"python{ver}",
-            fw_bin / "python3",
-            macos_dir / "python3",
-            macos_dir / "python",
-        ]
-        for cand in candidates:
-            if cand.exists() and not cand.samefile(stub):
-                return [str(cand), "-m", "photos_tool"]
-        # Never re-run the stub: fail loudly so the build gets fixed.
-        raise RuntimeError(
-            "bundled python interpreter not found next to the app stub; checked: "
-            f"{[str(c) for c in candidates]}"
-        )
+    # Frozen PyInstaller .app: re-invoke OURSELVES with a sentinel so the CLI child is the
+    # app's own signed binary — macOS attributes the osxphotos/PhotoKit work to the app's
+    # bundle id ("photos-tool"), not a generic "Python". main() dispatches on the sentinel.
+    if is_pyinstaller_bundle():
+        return [sys.executable, "--pyi-cli"]
     # Dev/CI: prefer the photos-tool console script next to sys.argv[0] (same venv) so the
     # GUI drives its own versioned CLI, not a stale pyenv shim. Fall back to PATH. Return an
     # absolute path when we have one.
@@ -127,7 +117,160 @@ def _acquire_single_instance_lock():
     return handle
 
 
+# Flips to True once AEDeterminePermissionToAutomateTarget returns 0 (granted) this session,
+# so routine sends skip the foreground-activation dance + the watchdog wait below. The grant
+# persists in TCC and the osxphotos children inherit it; a later revocation just degrades to a
+# graceful "nothing selected" on the next send (osxphotos can't read a denied selection).
+_AUTOMATION_GRANTED = False
+
+
+def request_photos_automation() -> int | None:
+    """Proactively obtain the one-time Automation->Photos ("control Photos") consent.
+
+    Reading the live Photos *selection* needs Apple Events consent. The osxphotos child is a
+    non-interactive subprocess that can never present that prompt, so the menu-bar parent must
+    obtain the grant once; it is keyed to this bundle id, so the self-reinvoked osxphotos
+    children inherit it. Cached per-process so only the FIRST send pays the activation cost.
+
+    Returns the ``OSStatus`` from ``AEDeterminePermissionToAutomateTarget`` -- ``0`` granted,
+    ``-1743`` declined, ``-1744`` could-not-prompt, ``-600`` Photos not running -- or ``None``
+    if the request could not be made at all (e.g. it hung past the watchdog).
+
+    Three OS requirements the earlier ``NSAppleScript`` attempt silently missed:
+
+      * the bundle Info.plist must declare ``NSAppleEventsUsageDescription`` or tccd refuses
+        the request outright -- no dialog, no Automation-pane entry (set in the .spec);
+      * an LSUIElement agent is never the *active* app and macOS suppresses the consent dialog
+        for inactive apps, so we briefly become a regular foreground app AND spin the run loop
+        so the asynchronous activation actually lands before we ask;
+      * ``AEDeterminePermissionToAutomateTarget`` (Apple's purpose-built prompt trigger) returns
+        an actionable status, where a fire-and-forget AppleScript send just no-ops.
+    """
+    global _AUTOMATION_GRANTED
+    if _AUTOMATION_GRANTED:
+        return 0  # already granted this session: fast path, no activation dance, no wait
+    try:
+        import ctypes
+        import threading
+        from ctypes import c_int32, c_uint8, c_uint32, c_void_p
+
+        from AppKit import (
+            NSApplication,
+            NSApplicationActivationPolicyAccessory,
+            NSApplicationActivationPolicyRegular,
+            NSWorkspace,
+        )
+        from Foundation import NSAppleEventDescriptor, NSDate, NSRunLoop
+
+        photos_bid = "com.apple.Photos"
+        type_wildcard = 0x2A2A2A2A  # four-char code '****' -- "may I send ANY event?"
+
+        # Not bound by PyObjC; reach the C API through the CoreServices umbrella framework.
+        core = ctypes.CDLL("/System/Library/Frameworks/CoreServices.framework/CoreServices")
+        determine = core.AEDeterminePermissionToAutomateTarget
+        # OSStatus(const AEAddressDesc*, AEEventClass, AEEventID, Boolean)
+        determine.argtypes = [c_void_p, c_uint32, c_uint32, c_uint8]
+        determine.restype = c_int32
+
+        workspace = NSWorkspace.sharedWorkspace()
+        # Photos must be running or the call returns -600 (and is more prone to hang).
+        running = workspace.runningApplications()
+        if not any(a.bundleIdentifier() == photos_bid for a in running):
+            workspace.launchApplication_("Photos")
+
+        app = NSApplication.sharedApplication()
+        app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+        app.activateIgnoringOtherApps_(True)
+        # Activation is asynchronous; spin the run loop so we are genuinely frontmost before
+        # asking -- exactly what the old synchronous NSAppleScript path got wrong.
+        NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.5))
+        try:
+            descriptor = NSAppleEventDescriptor.descriptorWithBundleIdentifier_(photos_bid)
+            ae_desc = descriptor.aeDesc()  # a PyObjCPointer wrapping the C AEDesc*
+            # objc.pyobjc_id() does NOT work here (the AEDesc is not an ObjC object);
+            # .pointerAsInteger is the AEDesc address (a bare int, zero ownership). The buffer
+            # is owned by `descriptor`, pinned for the worker's whole life inside _ask().
+            target_ptr = c_void_p(ae_desc.pointerAsInteger)
+
+            result: dict[str, int] = {}
+
+            def _ask(_keep_descriptor: Any = descriptor) -> None:
+                # askUserIfNeeded=1 presents "photos-tool wants to control Photos" and blocks
+                # until answered; off the main thread + watchdog-joined because this call is
+                # known to occasionally hang at semaphore_wait_trap (Apple FB9126429).
+                #
+                # The `_keep_descriptor` default arg pins `descriptor` to this function for the
+                # worker thread's whole life: target_ptr aliases the AEDesc buffer `descriptor`
+                # owns, and on the orphaned-hang path the enclosing frame returns and would
+                # otherwise GC `descriptor`, freeing the buffer while determine() still reads it.
+                result["status"] = determine(target_ptr, type_wildcard, type_wildcard, 1)
+
+            worker = threading.Thread(target=_ask, name="photos-automation", daemon=True)
+            worker.start()
+            # This join blocks the main rumps thread until the user answers the dialog -- a
+            # one-time, first-grant cost (cached above thereafter). The 120s ceiling only bites
+            # on a true semaphore-wait hang, recovering rather than freezing forever.
+            worker.join(timeout=120)
+            status = result.get("status")  # None if it hung past the timeout
+            if status == 0:
+                _AUTOMATION_GRANTED = True
+            return status
+        finally:
+            app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+    except Exception as exc:  # never crash the caller
+        print(f"photos-tool: could not request Photos automation consent: {exc}", file=sys.stderr)
+        return None
+
+
+def _maybe_dispatch_reinvocation(argv: list[str]) -> int | None:
+    """Run a self-reinvocation sentinel and return its exit code, or ``None`` for normal startup.
+
+    The frozen PyInstaller app shells out to ITSELF for the CLI and for osxphotos (so both run
+    inside the app's own signed binary, giving a clean "photos-tool" TCC identity); this routes
+    the sentinels to the right entry point. Pure + unit-tested so a sentinel typo in the argv
+    builders (``_cli_prefix`` / ``_osxphotos_argv``) can't drift silently. ``argv`` is sys.argv[1:].
+    """
+    if argv[:1] == ["--pyi-cli"]:
+        from .cli import main as cli_main
+
+        return cli_main(argv[1:])
+    if argv[:1] == ["--pyi-osxphotos"]:
+        import runpy
+
+        sys.argv = ["osxphotos", *argv[1:]]
+        runpy.run_module("osxphotos.__main__", run_name="__main__")
+        return 0
+    if argv[:1] == ["--pyi-prime-imports"]:
+        # Side-effect-free build smoke (scripts/build-app.sh): prove the consent machinery's
+        # dependencies survived PyInstaller collection -- import AppKit/Foundation/ctypes and
+        # RESOLVE the CoreServices symbol request_photos_automation() needs -- WITHOUT launching
+        # Photos, flipping activation policy, or asking for consent. A collect_all/hiddenimports
+        # regression breaks here; the real --pyi-prime-photos path would instead pop a consent
+        # dialog and hang the build up to 120s, so it must NOT be used as a build smoke.
+        import ctypes
+
+        import AppKit  # noqa: F401  (presence is the test)
+        import Foundation  # noqa: F401
+
+        core = ctypes.CDLL("/System/Library/Frameworks/CoreServices.framework/CoreServices")
+        _ = core.AEDeterminePermissionToAutomateTarget  # resolve the symbol; never call it here
+        print("pyi-prime-imports OK")
+        return 0
+    if argv[:1] == ["--pyi-prime-photos"]:
+        # Manual, on-a-real-Mac entry to obtain (or re-confirm) the "control Photos" grant from
+        # the app's own signed identity (pops the consent dialog + can block up to 120s -- NOT a
+        # build smoke; see --pyi-prime-imports). Prints the OSStatus; always exits 0.
+        status = request_photos_automation()
+        print(f"AEDeterminePermissionToAutomateTarget -> {status}")
+        return 0
+    return None
+
+
 def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
+    dispatched = _maybe_dispatch_reinvocation(sys.argv[1:])
+    if dispatched is not None:
+        raise SystemExit(dispatched)
+
     import rumps
 
     lock = _acquire_single_instance_lock()
@@ -154,6 +297,8 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
             self.menu = [
                 self.status,
                 None,
+                "Set up connection…",
+                None,
                 "Send Selected Photos",
                 "Send Album…",
                 None,
@@ -175,6 +320,14 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
             self._timer = rumps.Timer(self._drain, 0.3)
             self._timer.start()
 
+            # First-run onboarding: with no config yet, reflect it in the status line and
+            # nudge the user to connect (the prompt fires from the first _drain tick, on the
+            # main thread, so it never blocks __init__/run-loop startup).
+            self._configured = default_config_path().exists()
+            self._welcomed = False
+            if not self._configured:
+                self.status.title = "Not connected — click Set up connection…"
+
         # ---- main thread only: enqueue + UI -------------------------------
 
         def _start(self, kind: str, **payload: Any) -> bool:
@@ -189,16 +342,75 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
             self._jobs.put(job)
             return True
 
+        def _ask_text(self, prompt: str, title: str, default: str = "") -> str | None:
+            """Native text prompt via osascript — reliably typeable for a menu-bar agent.
+
+            rumps.Window/NSAlert text fields never get keyboard focus when the app is a
+            menu-bar (accessory) agent, so collect input through macOS's OWN dialog instead.
+            Returns the entered text, or None if the user cancelled or left it empty.
+            """
+
+            def q(value: str) -> str:
+                return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+            script = (
+                f"text returned of (display dialog {q(prompt)} "
+                f"default answer {q(default)} with title {q(title)})"
+            )
+            try:
+                proc = subprocess.run(
+                    ["/usr/bin/osascript", "-e", script],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except OSError:
+                return None
+            if proc.returncode != 0:  # user cancelled
+                return None
+            return proc.stdout.strip() or None
+
+        def _open_automation_settings(self) -> None:
+            """Explain the missing Automation->Photos grant and open the right Settings pane.
+
+            Reached only when consent was declined or could not be presented. Also steers the
+            user to "Send Album…", which is Full-Disk-Access-only and needs no Apple Events.
+            """
+            from AppKit import NSWorkspace
+            from Foundation import NSURL
+
+            rumps.alert(
+                "Allow photos-tool to read your selection",
+                "photos-tool needs permission to control Photos so it can see which photos "
+                "you've selected.\n\nEnable photos-tool under Automation in the window that "
+                "opens, then click Send Selected Photos again.\n\nOr use “Send Album…”, which "
+                "backs up an album and needs no extra permission.",
+            )
+            # The `open` CLI is ignored by System Settings on Ventura+; use NSWorkspace.
+            url = NSURL.URLWithString_(
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
+            )
+            NSWorkspace.sharedWorkspace().openURL_(url)
+
         @rumps.clicked("Send Selected Photos")
         def send_selected(self, _: Any) -> None:
-            self._start("send", album=None)
+            # One-time "control Photos" consent (Apple Events) so osxphotos can read the live
+            # selection. 0 == granted; None == could-not-ask (best-effort send anyway, the
+            # send's own "nothing selected" path covers a still-missing grant); a real denial
+            # (-1743) or unpresentable prompt (-1744/-600) routes the user to Settings.
+            status = request_photos_automation()
+            if send_action_for_automation_status(status) == "send":
+                self._start("send", album=None)
+            else:
+                self._open_automation_settings()
 
         @rumps.clicked("Send Album…")
         def send_album(self, _: Any) -> None:
-            # Modal — collect input on the main thread BEFORE enqueueing the job.
-            resp = rumps.Window("Album name to send:", "Send Album", dimensions=(240, 24)).run()
-            if resp.clicked and resp.text.strip():
-                self._start("send", album=resp.text.strip())
+            # Collect input on the main thread BEFORE enqueueing the job.
+            album = self._ask_text("Album name to send:", "Send Album")
+            if album:
+                self._start("send", album=album)
 
         @rumps.clicked("Clean up last backup…")
         def cleanup_clicked(self, _: Any) -> None:
@@ -211,8 +423,42 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
         def diagnostics(self, _: Any) -> None:
             self._start("doctor")
 
+        @rumps.clicked("Set up connection…")
+        def setup_clicked(self, _: Any) -> None:
+            self._run_setup()
+
+        def _run_setup(self) -> None:
+            # Re-setup guard: don't let a stray click clobber a working connection silently.
+            if default_config_path().exists() and (
+                rumps.alert(
+                    "Already connected",
+                    "Reconnect or change the backup share? Your existing settings "
+                    "will be replaced.",
+                    ok="Reconnect",
+                    cancel="Cancel",
+                )
+                != 1
+            ):
+                return
+            smb_url = self._ask_text(SETUP_PROMPT_TEXT, SETUP_PROMPT_TITLE, default="smb://")
+            if smb_url and smb_url != "smb://":
+                self._start("connect", smb_url=smb_url)
+
         def _drain(self, _timer: Any) -> None:
             """Sole place that touches rumps UI from queue results (main thread)."""
+            if not self._configured and not self._welcomed:
+                self._welcomed = True
+                if (
+                    rumps.alert(
+                        "Welcome to photos-tool",
+                        "Let's connect to your backup. Click Set up to enter your "
+                        "Windows shared folder address.",
+                        ok="Set up",
+                        cancel="Later",
+                    )
+                    == 1
+                ):
+                    self._run_setup()
             while True:
                 try:
                     result = self._results.get_nowait()
@@ -240,8 +486,20 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
                 rumps.alert(
                     "photos-tool diagnostics", result.get("output") or "doctor produced no output"
                 )
+            elif kind == "connect":
+                self._show_connect_result(result)
             elif kind == "error":
                 rumps.alert(result.get("title") or "Error", result.get("message") or "")
+
+        def _show_connect_result(self, result: dict[str, Any]) -> None:
+            outcome = parse_connect_result(result.get("stdout", ""))
+            if outcome.ok:
+                self._configured = True
+                self.status.title = "Connected — ready to send"
+                note = connect_success_message(outcome.destination)
+            else:
+                note = connect_failure_message(outcome.error)
+            rumps.alert(note.title, note.message)
 
         def _show_send_result(self, result: dict[str, Any]) -> None:
             code = result.get("code")
@@ -297,8 +555,27 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
                         self._results.put(self._do_cleanup_apply())
                     elif kind == "doctor":
                         self._results.put(self._do_doctor())
+                    elif kind == "connect":
+                        self._results.put(self._do_connect(job.get("smb_url", "")))
                 except Exception as exc:  # never let the worker die
                     self._results.put({"kind": "error", "title": "Error", "message": str(exc)})
+
+        def _do_connect(self, smb_url: str) -> dict[str, Any]:
+            # Runs `photos-tool connect`, which triggers macOS's OWN mount/auth dialog
+            # (password -> Keychain, never seen here). The worker blocks on that dialog;
+            # the menu bar stays responsive.
+            try:
+                proc = subprocess.run(
+                    build_connect_argv(cli_prefix, smb_url),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                )
+            except OSError as exc:
+                return {"kind": "error", "title": "Setup failed", "message": str(exc)}
+            return {"kind": "connect", "stdout": proc.stdout or ""}
 
         def _do_send(self, album: str | None) -> dict[str, Any]:
             argv = build_send_argv(cli_prefix, album=album)

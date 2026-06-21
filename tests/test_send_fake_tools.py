@@ -757,6 +757,133 @@ def test_boot_volume_destination_refused_for_send_and_cleanup(
     assert "boot disk" in capsys.readouterr().err
 
 
+def test_connect_mounts_then_writes_config(tmp_path: Path, fake_tools, capsys):
+    # The no-Terminal onboarding: connect triggers the (faked) native mount, then writes
+    # a usable config pointing at the share.
+    from photos_tool import config as cfg
+
+    mount = tmp_path / "FamilyPhotos"
+    mount.mkdir()
+    config = tmp_path / "config.toml"
+    fake_tools(scenario(mount, initial_mounted=False))  # mounts only once osascript runs
+
+    rc = cli.main(
+        [
+            "connect",
+            "--smb-url",
+            "smb://pc/FamilyPhotos",
+            "--mount-point",
+            str(mount),
+            "--subpath",
+            "MacA",
+            "--config",
+            str(config),
+            "--json",
+        ]
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["ok"] is True and out["subpath"] == "MacA"
+    assert config.exists()
+    loaded = cfg.load_config(str(config))
+    assert loaded.destination.smb_url == "smb://pc/FamilyPhotos"
+    assert str(mount) in loaded.destination.mount_point
+
+
+def test_connect_writes_no_config_when_the_share_cannot_mount(tmp_path: Path, fake_tools, capsys):
+    mount = tmp_path / "FamilyPhotos"
+    mount.mkdir()
+    config = tmp_path / "config.toml"
+    fake_tools(scenario(mount, initial_mounted=False, mount_fail=True))
+
+    rc = cli.main(
+        [
+            "connect",
+            "--smb-url",
+            "smb://pc/FamilyPhotos",
+            "--mount-point",
+            str(mount),
+            "--config",
+            str(config),
+            "--json",
+        ]
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert rc == cli.EXIT_PREFLIGHT
+    assert out["ok"] is False and out["error"]
+    assert not config.exists()  # a bad/unreachable share never leaves a broken config
+
+
+def test_connect_rejects_a_bad_url_without_mounting(tmp_path: Path, capsys):
+    config = tmp_path / "config.toml"
+    rc = cli.main(["connect", "--smb-url", "not-a-real-url", "--config", str(config), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == cli.EXIT_USAGE
+    assert out["ok"] is False
+    assert not config.exists()
+
+
+def test_connect_refuses_to_overwrite_config_without_force(tmp_path: Path, fake_tools, capsys):
+    mount = tmp_path / "FamilyPhotos"
+    mount.mkdir()
+    config = write_config(tmp_path, mount)  # a config already exists
+    fake_tools(scenario(mount, initial_mounted=False))
+
+    rc = cli.main(
+        [
+            "connect",
+            "--smb-url",
+            "smb://pc/FamilyPhotos",
+            "--mount-point",
+            str(mount),
+            "--config",
+            str(config),
+            "--json",
+        ]
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert rc == cli.EXIT_USAGE
+    assert out["ok"] is False and "already exists" in out["error"]
+
+
+def test_osxphotos_argv_self_reinvokes_only_in_the_frozen_app(monkeypatch):
+    # In the frozen .app, osxphotos runs via the app's OWN binary (self-reinvocation); in
+    # dev/CI it stays the plain `osxphotos` on PATH (so the fake-tool tests keep working).
+    from photos_tool import osxphotos_runner as runner
+
+    # Dev (not frozen): unchanged.
+    assert runner._osxphotos_argv(["osxphotos", "query"]) == ["osxphotos", "query"]
+    # Frozen PyInstaller app: rewrite to the app's own binary + sentinel.
+    monkeypatch.setattr(runner.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(runner.sys, "_MEIPASS", "/tmp/meipass", raising=False)
+    exe = "/Applications/photos-tool.app/Contents/MacOS/photos-tool"
+    monkeypatch.setattr(runner.sys, "executable", exe)
+    assert runner._osxphotos_argv(["osxphotos", "query", "--count"]) == [
+        exe,
+        "--pyi-osxphotos",
+        "query",
+        "--count",
+    ]
+    # Non-osxphotos commands are never rewritten, even when frozen.
+    assert runner._osxphotos_argv(["ffmpeg", "-i", "x"]) == ["ffmpeg", "-i", "x"]
+
+
+def test_probe_finds_osxphotos_in_the_frozen_app(monkeypatch):
+    # In the frozen .app osxphotos has no PATH binary; the probe must still find it via
+    # self-reinvocation, or send's tool preflight would wrongly block.
+    from photos_tool import osxphotos_runner, tooling
+
+    exe = "/Applications/photos-tool.app/Contents/MacOS/photos-tool"
+    monkeypatch.setattr(osxphotos_runner.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(osxphotos_runner.sys, "_MEIPASS", "/tmp/meipass", raising=False)
+    monkeypatch.setattr(osxphotos_runner.sys, "executable", exe)
+    # Don't actually run the version command; just confirm the probe resolves to the app binary.
+    monkeypatch.setattr(tooling, "_query_version", lambda argv: "osxphotos, version 0.76.1")
+    osx_tool = next(t for t in tooling.REQUIRED_TOOLS if t.name == "osxphotos")
+    status = tooling.probe(osx_tool)
+    assert status.found and status.path == exe and status.version
+
+
 def _record_a_backup(tmp_path: Path, mount: Path, fake_tools) -> Path:
     config = write_config(tmp_path, mount)
     fake_tools(

@@ -8,11 +8,13 @@ orchestration testable with fake executables on PATH.
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, NoReturn
 
+from ._frozen import is_pyinstaller_bundle
 from .plan import ExportOptions, build_export_command
 from .report import parse_report
 
@@ -132,7 +134,18 @@ def is_authorization_error(exc: BaseException) -> bool:
     )
 
 
+def _osxphotos_argv(cmd: list[str]) -> list[str]:
+    """Inside the frozen .app, run osxphotos via the app's OWN binary (self-reinvocation) so it
+    stays inside the code signature and no external ``osxphotos`` binary is needed. In dev/CI,
+    use the ``osxphotos`` CLI on PATH (so the fake-tool tests still work).
+    """
+    if cmd[:1] == ["osxphotos"] and is_pyinstaller_bundle():
+        return [sys.executable, "--pyi-osxphotos", *cmd[1:]]
+    return cmd
+
+
 def _run(cmd: list[str], timeout: float | None) -> subprocess.CompletedProcess[str]:
+    cmd = _osxphotos_argv(cmd)
     try:
         return subprocess.run(
             cmd,

@@ -64,7 +64,7 @@ def test_init_non_interactive_writes_config_without_secrets(tmp_path, capsys):
 
     assert rc == 0
     assert "Wrote" in captured.out
-    assert "install-shortcut" in captured.out
+    assert "Full Disk Access" in captured.out  # init points the user at the macOS grants
     assert 'smb_url = "smb://192.168.1.50/FamilyPhotos"' in text
     assert 'mount_point = "/Volumes/FamilyPhotos"' in text
     assert "jpeg = true" in text

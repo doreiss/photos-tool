@@ -12,6 +12,7 @@ from photos_tool.report import (
     parse_report,
     sanitize_report,
     summarize,
+    summarize_rows,
     unexpected_columns,
 )
 
@@ -226,3 +227,24 @@ def test_authoritative_real_report_parses_without_warnings():
     reconciliation = summarize(report, selected_assets=4)
     assert reconciliation.ok
     assert reconciliation.status is Status.OK
+
+
+def test_touched_only_row_contributes_no_exported_path():
+    # A row osxphotos "touched" (metadata/date only) but did NOT export and did NOT skip must
+    # contribute no path: its original's bytes were not written this run, so it must never become
+    # removable. Guards report.py's `(row_exported or row_skipped)` gate against being loosened
+    # back to "not missing and not error" (which would authorize deleting an un-written original).
+    rows = [
+        {
+            "uuid": "ABC-123",
+            "filename": "IMG_0001.HEIC",
+            "exported": "",  # not exported
+            "skipped": "",  # not already-present
+            "missing": "",
+            "error": "",
+        }
+    ]
+    summary = summarize_rows(rows)
+    # uuid present, but nothing positively on the share => no removable path for this asset.
+    assert summary.exported_paths == {}
+    assert "ABC-123" not in (summary.exported_uuids or frozenset())

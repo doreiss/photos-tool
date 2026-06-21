@@ -50,10 +50,10 @@ class ToolStatus:
         return self.path is not None
 
 
-def _query_version(path: str, version_args: tuple[str, ...]) -> str | None:
+def _query_version(argv: Sequence[str]) -> str | None:
     try:
         result = subprocess.run(
-            [path, *version_args],
+            [*argv],
             capture_output=True,
             text=True,
             timeout=15,
@@ -66,9 +66,21 @@ def _query_version(path: str, version_args: tuple[str, ...]) -> str | None:
 
 
 def probe(tool: Tool, which: Callable[[str], str | None] = shutil.which) -> ToolStatus:
-    """Locate ``tool`` on PATH and capture its version string if present."""
+    """Locate ``tool`` and capture its version string if present.
+
+    osxphotos has no binary on PATH inside the frozen .app bundle — it runs via the app's
+    own binary (self-reinvocation). Probe it through that same path so the bundle reports it
+    found (and ``send``'s preflight doesn't wrongly block on it).
+    """
+    if tool.name == "osxphotos":
+        from .osxphotos_runner import _osxphotos_argv
+
+        argv = _osxphotos_argv([tool.name, *tool.version_args])
+        if argv[0] != tool.name:  # frozen bundle: [app-exe, --pyi-osxphotos/-m, --version]
+            return ToolStatus(tool=tool, path=argv[0], version=_query_version(argv))
+
     path = which(tool.name)
-    version = _query_version(path, tool.version_args) if path else None
+    version = _query_version([path, *tool.version_args]) if path else None
     return ToolStatus(tool=tool, path=path, version=version)
 
 

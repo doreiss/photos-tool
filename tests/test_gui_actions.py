@@ -8,6 +8,7 @@ from photos_tool.gui_actions import (
     confirm_reveal_message,
     map_exit_code,
     parse_cleanup_query,
+    send_action_for_automation_status,
     status_glyph,
 )
 
@@ -150,3 +151,110 @@ def test_menubar_imports_without_the_gui_extra():
     assert callable(menubar.main)
     prefix = menubar._cli_prefix()
     assert isinstance(prefix, list) and prefix and all(isinstance(p, str) for p in prefix)
+
+
+def test_cli_prefix_self_reinvokes_under_pyinstaller(monkeypatch):
+    # In a PyInstaller bundle, the CLI child is the app's OWN frozen binary (+ a sentinel), so
+    # osxphotos/PhotoKit run inside the app's code signature ("photos-tool" TCC identity).
+    import photos_tool.menubar as menubar
+
+    exe = "/Applications/photos-tool.app/Contents/MacOS/photos-tool"
+    monkeypatch.setattr(menubar.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(menubar.sys, "_MEIPASS", "/tmp/meipass", raising=False)
+    monkeypatch.setattr(menubar.sys, "executable", exe)
+    assert menubar._cli_prefix() == [exe, "--pyi-cli"]
+
+
+def test_maybe_dispatch_reinvocation_routes_cli_and_none(monkeypatch):
+    # The frozen app shells out to itself; --pyi-cli must hand the remaining argv to cli.main
+    # (so a sentinel-string typo vs the argv builders is caught), and no sentinel -> None.
+    import photos_tool.menubar as menubar
+
+    seen = {}
+
+    def fake_cli_main(argv):
+        seen["argv"] = argv
+        return 0
+
+    monkeypatch.setattr("photos_tool.cli.main", fake_cli_main)
+    assert menubar._maybe_dispatch_reinvocation(["--pyi-cli", "doctor", "--json"]) == 0
+    assert seen["argv"] == ["doctor", "--json"]
+    assert menubar._maybe_dispatch_reinvocation(["something-else"]) is None
+    assert menubar._maybe_dispatch_reinvocation([]) is None
+
+
+def test_maybe_dispatch_reinvocation_routes_osxphotos(monkeypatch):
+    import runpy
+
+    import photos_tool.menubar as menubar
+
+    calls = {}
+
+    def fake_run_module(mod, run_name):
+        calls["mod"] = mod
+        calls["argv"] = list(menubar.sys.argv)
+
+    monkeypatch.setattr(menubar.sys, "argv", ["orig"])  # registered so monkeypatch restores it
+    monkeypatch.setattr(runpy, "run_module", fake_run_module)
+    assert menubar._maybe_dispatch_reinvocation(["--pyi-osxphotos", "query", "--count"]) == 0
+    assert calls["mod"] == "osxphotos.__main__"
+    assert calls["argv"] == ["osxphotos", "query", "--count"]
+
+
+def test_send_action_routes_automation_status():
+    # The other half of the Automation bug fix: a flipped comparison (routing a granted 0 to
+    # Settings, or a -1743 denial into a silently-empty send) would ship unnoticed without this.
+    assert send_action_for_automation_status(0) == "send"  # granted
+    assert send_action_for_automation_status(None) == "send"  # could-not-ask -> best effort
+    assert send_action_for_automation_status(-1743) == "open_settings"  # declined
+    assert send_action_for_automation_status(-1744) == "open_settings"  # unpresentable
+    assert send_action_for_automation_status(-600) == "open_settings"  # Photos not running
+
+
+def test_maybe_dispatch_reinvocation_routes_prime_photos(monkeypatch):
+    # The frozen app primes/verifies the "control Photos" grant from its OWN signed identity
+    # via a sentinel; the dispatch must call request_photos_automation and exit 0 (the OSStatus
+    # is printed, never used as the exit code).
+    import photos_tool.menubar as menubar
+
+    called = {}
+
+    def fake_request():
+        called["yes"] = True
+        return 0
+
+    monkeypatch.setattr(menubar, "request_photos_automation", fake_request)
+    assert menubar._maybe_dispatch_reinvocation(["--pyi-prime-photos"]) == 0
+    assert called.get("yes") is True
+
+
+def test_build_connect_argv_includes_json_and_force():
+    from photos_tool.gui_actions import build_connect_argv
+
+    argv = build_connect_argv(["pt"], "smb://pc/Share", config="/c.toml")
+    assert argv == [
+        "pt",
+        "connect",
+        "--smb-url",
+        "smb://pc/Share",
+        "--config",
+        "/c.toml",
+        "--json",
+        "--force",
+    ]
+    # The list prefix splats for the frozen (.app) invocation too.
+    frozen = build_connect_argv(["/p/python", "-m", "photos_tool"], "smb://x/y")
+    assert frozen[:4] == ["/p/python", "-m", "photos_tool", "connect"]
+
+
+def test_parse_connect_result_ok_failure_and_garble():
+    from photos_tool.gui_actions import ConnectResult, parse_connect_result
+
+    ok = parse_connect_result('{"ok": true, "destination": "/Volumes/Share/MacA"}')
+    assert ok == ConnectResult(True, "/Volumes/Share/MacA", "")
+    bad = parse_connect_result('{"ok": false, "error": "nope"}')
+    assert bad == ConnectResult(False, "", "nope")
+    # Any garble is a failure, never "ok" (a transient hiccup must not look like success).
+    assert parse_connect_result("not json").ok is False
+    assert parse_connect_result("[1, 2]").ok is False
+    assert parse_connect_result("").ok is False

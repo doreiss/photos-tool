@@ -1,3 +1,4 @@
-# Build-only dependency: produces dist/photos-tool.app via `python setup.py py2app`.
+# Build-only dependency: produces dist/photos-tool.app via scripts/build-app.sh (PyInstaller).
 # Deliberately NOT in pyproject [project.dependencies] so the runtime/wheel stays clean.
-py2app>=0.28.8
+# (PyInstaller --windowed bundles osxphotos's full tree via --collect-all; py2app could not.)
+pyinstaller>=6.0

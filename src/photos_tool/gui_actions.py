@@ -26,6 +26,21 @@ class Notification:
     message: str
 
 
+def send_action_for_automation_status(status: int | None) -> str:
+    """Decide what to do after ``request_photos_automation()`` returns its OSStatus.
+
+    ``0`` (granted) -> ``"send"``. ``None`` (could-not-ask: watchdog timeout / exception)
+    -> best-effort ``"send"`` anyway; the send's own "nothing selected" path covers a
+    still-missing grant. Any real failure status (``-1743`` declined, ``-1744`` could-not-
+    prompt, ``-600`` Photos not running) -> ``"open_settings"``, so the user is steered to
+    the Automation pane instead of a silently-empty send. Pure so it's unit-tested (the
+    rumps callback that calls it is not).
+    """
+    if status == 0 or status is None:
+        return "send"
+    return "open_settings"
+
+
 def build_send_argv(
     cli_prefix: list[str],
     *,
@@ -145,4 +160,72 @@ def confirm_delete_message(count: int) -> Notification:
         "Did they all arrive?",
         f"Move {count} backed-up original(s) to Recently Deleted? "
         "They stay recoverable for 30 days.",
+    )
+
+
+# ---- first-run connection onboarding (no-Terminal setup) --------------------------
+
+SETUP_PROMPT_TITLE = "Connect to your backup"
+SETUP_PROMPT_TEXT = (
+    "Enter the address of your Windows shared folder — it looks like\n"
+    "smb://192.168.1.50/FamilyPhotos (ask whoever set up the PC if unsure).\n\n"
+    "Next, macOS will ask for the share's username and password and offer to\n"
+    "save them to your Keychain. photos-tool never sees or stores the password."
+)
+
+
+@dataclass(frozen=True)
+class ConnectResult:
+    ok: bool
+    destination: str
+    error: str
+
+
+def build_connect_argv(
+    cli_prefix: list[str],
+    smb_url: str,
+    *,
+    config: str | None = None,
+) -> list[str]:
+    """Build the ``photos-tool connect`` argv for the GUI setup flow.
+
+    ``--force`` is always passed: "Set up connection…" is a deliberate user action, and
+    the GUI confirms a reconnect before calling this. ``--json`` gives a parseable result.
+    """
+    argv = [*cli_prefix, "connect", "--smb-url", smb_url]
+    if config:
+        argv += ["--config", config]
+    argv += ["--json", "--force"]
+    return argv
+
+
+def parse_connect_result(stdout: str) -> ConnectResult:
+    """Parse ``connect --json`` stdout. Any garble is treated as a failure (never 'ok')."""
+    try:
+        data = json.loads(stdout.strip() or "{}")
+    except json.JSONDecodeError:
+        return ConnectResult(False, "", "photos-tool did not return a result")
+    if not isinstance(data, dict):
+        return ConnectResult(False, "", "unexpected result from photos-tool")
+    return ConnectResult(
+        ok=bool(data.get("ok")),
+        destination=str(data.get("destination") or ""),
+        error=str(data.get("error") or ""),
+    )
+
+
+def connect_success_message(destination: str) -> Notification:
+    return Notification(
+        "Connected",
+        f"Your photos will back up to:\n{destination}\n\n"
+        "Select photos in Photos, then click Send Selected Photos.",
+    )
+
+
+def connect_failure_message(error: str) -> Notification:
+    detail = error.strip() or "could not connect to the share."
+    return Notification(
+        "Couldn't connect",
+        f"{detail}\n\nCheck the address, that the PC is on and sharing, and the "
+        "password, then try Set up connection… again.",
     )

@@ -428,6 +428,84 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return EXIT_OK if ok else EXIT_PREFLIGHT
 
 
+def _cmd_connect(args: argparse.Namespace) -> int:
+    """Connect to the SMB share (triggering macOS's native auth) and write the config.
+
+    The no-Terminal onboarding entry point the menu-bar app's "Set up connection…" calls.
+    The password is entered into macOS's OWN mount dialog and saved to Keychain — never
+    seen, passed in argv, or stored by photos-tool. Config is written only AFTER the share
+    is proven reachable and writable, so a bad address never leaves a broken config behind.
+    """
+    config_path = Path(args.config).expanduser() if args.config else default_config_path()
+    smb_url = (args.smb_url or "").strip()
+    try:
+        validate_smb_url(smb_url)
+    except ConfigError as exc:
+        return _connect_fail(args, EXIT_USAGE, f"invalid share address: {exc}")
+
+    mount_point = (args.mount_point or _default_mount_point(smb_url)).strip()
+    if not mount_point:
+        return _connect_fail(
+            args,
+            EXIT_USAGE,
+            "could not work out where the share mounts; pass --mount-point "
+            "(for example /Volumes/FamilyPhotos)",
+        )
+    subpath = args.subpath if args.subpath is not None else _default_subpath()
+
+    if config_path.exists() and not args.force:
+        return _connect_fail(
+            args, EXIT_USAGE, f"{config_path} already exists; pass --force to reconnect"
+        )
+
+    # Trigger the native mount + Keychain auth and prove the share is reachable + writable
+    # BEFORE writing any config.
+    try:
+        ensure_mounted(smb_url, Path(mount_point).expanduser())
+    except SmbError as exc:
+        return _connect_fail(args, EXIT_PREFLIGHT, str(exc))
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        _render_config(
+            smb_url=smb_url,
+            mount_point=mount_point,
+            subpath=subpath,
+            jpeg=args.jpeg,
+            mp4=args.mp4,
+        ),
+        encoding="utf-8",
+    )
+    destination = str(Path(mount_point).expanduser() / subpath) if subpath else mount_point
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "mount_point": mount_point,
+                    "subpath": subpath,
+                    "destination": destination,
+                }
+            )
+        )
+    else:
+        print(f"Connected. Backups from this Mac will go to {destination}.")
+        print(
+            "One-time macOS grants the app needs: Full Disk Access (read the library), "
+            "Automation -> Photos (read your selection), and Photos (the recoverable cleanup "
+            "delete). The menu-bar app prompts for the last two on first use."
+        )
+    return EXIT_OK
+
+
+def _connect_fail(args: argparse.Namespace, code: int, message: str) -> int:
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": False, "error": message}))
+    else:
+        print(f"could not connect: {message}", file=sys.stderr)
+    return code
+
+
 def _cmd_init(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser() if args.config else default_config_path()
     if args.non_interactive:
@@ -480,9 +558,9 @@ def _cmd_init(args: argparse.Namespace) -> int:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(text, encoding="utf-8")
     print(f"Wrote {config_path}")
-    print("Next: connect to the SMB share once in Finder and save the password in Keychain.")
-    print("Then grant Full Disk Access to the app that launches photos-tool.")
-    print("Run `photos-tool install-shortcut` to write a Shortcut-friendly launcher script.")
+    print("Next: connect to the SMB share once in Finder and save the password in Keychain")
+    print("(or use the menu-bar app's 'Set up connection…', which does this for you).")
+    print("Grant the app Full Disk Access; it prompts for Automation->Photos and Photos on use.")
     return EXIT_OK
 
 
@@ -579,6 +657,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument("destination", nargs="?", help="destination override")
     p_doctor.add_argument("--config", help="config TOML path")
     p_doctor.set_defaults(func=_cmd_doctor)
+
+    p_connect = sub.add_parser(
+        "connect",
+        help="connect to the SMB share (native macOS auth) and write the config — no manual setup",
+    )
+    p_connect.add_argument("--smb-url", required=True, help="smb://host/Share")
+    p_connect.add_argument(
+        "--mount-point", help="override the mount point (default: /Volumes/<Share>)"
+    )
+    p_connect.add_argument(
+        "--subpath", default=None, help="per-Mac subfolder (default: this Mac's name)"
+    )
+    p_connect.add_argument("--config", help="config TOML path")
+    p_connect.add_argument(
+        "--jpeg", action="store_true", help="default to JPEG compatibility copies"
+    )
+    p_connect.add_argument("--mp4", action="store_true", help="default to MP4 compatibility copies")
+    p_connect.add_argument("--force", action="store_true", help="overwrite an existing config")
+    p_connect.add_argument(
+        "--json", action="store_true", help="machine-readable result for the GUI"
+    )
+    p_connect.set_defaults(func=_cmd_connect)
 
     p_init = sub.add_parser("init", help="write a starter config file without storing secrets")
     p_init.add_argument("--config", help="config TOML path")
