@@ -50,7 +50,7 @@ class BackupFile:
     path: str  # absolute destination path
     size: int  # bytes
     mtime_ns: int  # st_mtime_ns of the landed copy
-    content: str  # sha256 hex of head+tail HASH_SPAN
+    content: str  # sha256 of the copy's content (whole file <=16 MiB, else sampled windows)
 
 
 @dataclass(frozen=True)

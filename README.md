@@ -39,7 +39,7 @@ iPhones can't collide on names like `IMG_0001`:
 ```
 
 The optional `compat/` tree (enable JPEG/MP4 copies in config) is a fully Windows-openable mirror —
-JPEG for every still, H.264 MP4 for every standalone video, no HEVC `.mov` — so a
+JPEG for every still, H.264 MP4 for every standalone HEVC video, no HEVC `.mov` — so a
 Windows PC with no codecs can browse `compat/` while the main tree stays original.
 
 ## Install
@@ -122,8 +122,8 @@ photos-tool cleanup-last               # 3b. move that batch's originals to Rece
 In the **menu-bar app**: use *"Clean up last backup…"* anytime. It first reveals a
 real backed-up file in Finder so you can confirm the photos arrived, then offers to
 move that batch's originals to Recently Deleted — a deliberate, separate step from the
-backup, never automatic. JPEG/MP4 copies and removal are config-only (set once at
-init in the TOML), so the menu exposes no per-run toggles.
+backup, never automatic. JPEG/MP4 copies are config-only (set once at init in the
+TOML), so the menu exposes no per-run toggles.
 
 Either way it only acts on a clean backup, deletes **exactly** the batch's photos and
 **only those re-verified present and non-empty on the share**, aborts if any don't
@@ -195,9 +195,9 @@ environment `pypi`) before the first tag.
 - [x] Opt-in Mac-side cleanup (move exported originals to Recently Deleted).
 - [x] 📷 menu-bar app; macOS Shortcut + hotkey; documented manual smoke test.
 - [x] PyPI Trusted-Publishing release + clean-install CI.
-- [x] No-Terminal `.app` bundle of the menu-bar app (PyInstaller, ad-hoc signed;
-      `scripts/build-app.sh`). Self-reinvokes so osxphotos/PhotoKit run under the app's
-      own TCC identity; declares the Photos/Automation usage descriptions.
+- [x] No-Terminal `.app` bundle of the menu-bar app (PyInstaller; `scripts/build-app.sh`).
+      Self-reinvokes so osxphotos/PhotoKit run under the app's own TCC identity; declares the
+      Photos/Automation usage descriptions.
 - [x] `.app` bundles its own exiftool (script + Perl lib, run via the system perl; fetched
       at build, verified by sha256) so it needs **no Homebrew** on the target Mac.
 - [x] Optional stable self-signed signing identity (`packaging/create-codesign-cert.sh`) so

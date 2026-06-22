@@ -6,7 +6,7 @@ The frozen app is a single signed binary that self-reinvokes (``--pyi-cli`` /
 ``--pyi-osxphotos``) so osxphotos and the PhotoKit delete run inside the app's own code
 signature — a clean "photos-tool" TCC identity. A real Mach-O launcher (no exec swap) is
 why the menu-bar status item draws; standalone py2app could not bundle osxphotos's
-~90-package tree (see docs/app-delivery-findings.md).
+~90-package tree (see docs/history/app-delivery-findings.md).
 """
 
 import os

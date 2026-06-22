@@ -1,5 +1,10 @@
 # Implementation audit
 
+> **ARCHIVED — point-in-time record.** Kept for the handoff-requirement → evidence mapping. Some
+> specifics below are stale: the exit-code list stops at 5, but a sixth code (`EXIT_UNVERIFIED=6`)
+> later shipped, and the "last local result" test count predates substantial test growth. Treat the
+> code as the source of truth.
+
 This maps the handoff requirements to current evidence. It is intentionally separate
 from the README so the remaining manual proof does not get lost.
 

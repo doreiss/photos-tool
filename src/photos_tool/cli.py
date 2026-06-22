@@ -765,7 +765,7 @@ def _print_missing_tools(missing: Sequence[ToolStatus]) -> None:
     names = ", ".join(status.tool.name for status in missing)
     print(f"Missing required tool(s): {names}", file=sys.stderr)
     print(
-        "Install with: pip install osxphotos && brew install exiftool"
+        "Install with: pip install 'osxphotos==0.76.1' && brew install exiftool"
         " (and brew install ffmpeg for MP4 copies)",
         file=sys.stderr,
     )

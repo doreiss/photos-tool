@@ -10,7 +10,7 @@
 # it ad-hoc signs (grants re-prompt each rebuild). EITHER WAY the build is un-notarized, so
 # `spctl -a -vv` reports REJECTED and the first launch needs a one-time right-click > Open.
 # (Standalone py2app was rejected — it can't bundle osxphotos's ~90-package tree; see
-# docs/app-delivery-findings.md.)
+# docs/history/app-delivery-findings.md.)
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
