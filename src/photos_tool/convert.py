@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 from dataclasses import dataclass
@@ -101,6 +102,12 @@ def probe_video_codec(path: Path) -> str:
 
 def transcode_to_mp4(source: Path, output: Path, crf: int = 20) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
+    # Transcode -> tag -> stamp into a SAME-DIR temp, then os.replace into place only after EVERY
+    # step succeeds. If any step fails the partial file is removed, so a metadata-incomplete MP4 is
+    # never left at the output path — otherwise _is_output_current (mtime>=source) would treat it as
+    # "current" forever and a metadata-stripped copy would ship. The temp keeps a .mp4 extension so
+    # ffmpeg's container auto-detect still works.
+    tmp = output.with_name(output.stem + ".partial.mp4")
     ffmpeg_cmd = [
         "ffmpeg",
         "-y",
@@ -116,9 +123,8 @@ def transcode_to_mp4(source: Path, output: Path, crf: int = 20) -> None:
         "use_metadata_tags",
         "-map_metadata",
         "0",
-        str(output),
+        str(tmp),
     ]
-    _run(ffmpeg_cmd)
     exiftool_cmd = [
         "exiftool",
         "-tagsFromFile",
@@ -127,14 +133,22 @@ def transcode_to_mp4(source: Path, output: Path, crf: int = 20) -> None:
         "QuickTimeUTC=1",
         "-all:all",
         "-overwrite_original",
-        str(output),
+        str(tmp),
     ]
-    _run(exiftool_cmd)
     try:
+        _run(ffmpeg_cmd)
+        _run(exiftool_cmd)
         stat = source.stat()
-        os.utime(output, (stat.st_atime, stat.st_mtime))
+        os.utime(tmp, (stat.st_atime, stat.st_mtime))
+        os.replace(tmp, output)  # atomic publish: the output appears only fully-formed
+    except ConversionError:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
     except OSError as exc:
-        raise ConversionError(f"could not set mtime on {output}: {exc}") from exc
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise ConversionError(f"could not finalize {output}: {exc}") from exc
 
 
 def _is_output_current(source: Path, output: Path) -> bool:

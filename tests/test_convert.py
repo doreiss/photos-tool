@@ -139,3 +139,33 @@ def test_find_video_candidates_maps_walk_oserror(tmp_path: Path, monkeypatch):
         assert "network dropped" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected ConversionError")
+
+
+def test_transcode_leaves_no_current_output_when_exiftool_fails(tmp_path: Path, monkeypatch):
+    # If exiftool fails AFTER ffmpeg succeeds, a metadata-incomplete MP4 must NOT be left at the
+    # output path — else _is_output_current would treat it as done forever and a metadata-stripped
+    # copy ships. The transcode writes to a temp and only os.replace's in on full success.
+    from photos_tool import convert
+
+    source = tmp_path / "clip.mov"
+    source.write_bytes(b"source-bytes")
+    output = tmp_path / "compat" / "clip.mp4"
+
+    def fake_run(cmd):
+        if cmd[0] == "ffmpeg":
+            Path(cmd[-1]).write_bytes(b"video-without-metadata")  # ffmpeg writes the temp target
+            return None
+        if cmd[0] == "exiftool":
+            raise convert.ConversionError("exiftool boom")
+        raise AssertionError(f"unexpected tool {cmd[0]}")
+
+    monkeypatch.setattr(convert, "_run", fake_run)
+
+    import pytest
+
+    with pytest.raises(convert.ConversionError):
+        convert.transcode_to_mp4(source, output)
+
+    assert not output.exists()  # nothing published
+    assert convert._is_output_current(source, output) is False  # a later run will re-transcode
+    assert list(output.parent.glob("*.partial.mp4")) == []  # temp cleaned up

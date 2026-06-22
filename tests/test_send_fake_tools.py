@@ -505,7 +505,9 @@ def test_send_mp4_transcodes_standalone_hevc_only(tmp_path: Path, fake_tools):
     assert "IMG_0001.MOV" not in " ".join(ffmpeg_calls[0])
     assert len(exiftool_calls) == 1
     assert "-overwrite_original" in exiftool_calls[0]
-    assert exiftool_calls[0][-1].endswith("VID_0002.mp4")
+    # exiftool tags the same-dir temp; the final .mp4 is atomically published only after every step.
+    assert exiftool_calls[0][-1].endswith("VID_0002.partial.mp4")
+    assert (mount / "compat" / "2024" / "01" / "VID_0002.mp4").exists()
 
 
 def test_send_jpeg_mp4_transcodes_from_main_tree_into_compat(tmp_path: Path, fake_tools):
@@ -540,7 +542,9 @@ def test_send_jpeg_mp4_transcodes_from_main_tree_into_compat(tmp_path: Path, fak
     # Source is the pristine original; the H.264 copy lands in the compat/ mirror.
     assert source.endswith("2024/01/VID_0002.MOV")
     assert "/compat/" not in source
-    assert output.endswith("/compat/2024/01/VID_0002.mp4")
+    # ffmpeg writes a same-dir temp; the final .mp4 is published atomically once tagging succeeds.
+    assert output.endswith("/compat/2024/01/VID_0002.partial.mp4")
+    assert (mount / "compat" / "2024" / "01" / "VID_0002.mp4").exists()
     # The compat pass never created a video to re-transcode.
     assert not (mount / "compat" / "2024" / "01" / "VID_0002.MOV").exists()
 
