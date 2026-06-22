@@ -396,6 +396,19 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     else:
         print(f"[pass] destination writable: {destination}")
 
+    # Surface the per-destination export DB (osxphotos's skip-decision source of truth). Read-only
+    # os.stat — never opens the foreign sqlite, never repairs. Not an error either way; an empty/
+    # missing DB just explains a re-send that writes duplicate "(1)" copies, so showing it lets the
+    # user spot a zeroed DB (e.g. after a crash). Symptom only — no "delete to fix" (a rebuilt DB
+    # still re-copies share files that already exist).
+    exportdb = resolved_exportdb_path(destination, Path(config.state.exportdb_dir).expanduser())
+    try:
+        size = exportdb.stat().st_size
+        suffix = "" if size > 0 else "  (empty — a re-send may write duplicate copies)"
+        print(f"[info] export DB: {exportdb} ({size} bytes){suffix}")
+    except OSError:
+        print(f"[info] export DB: not yet created ({exportdb})")
+
     selected = 0
     try:
         selected = count_assets()
