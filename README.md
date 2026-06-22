@@ -130,6 +130,30 @@ Either way it only acts on a clean backup, deletes **exactly** the batch's photo
 resolve, and moves them to **Recently Deleted (recoverable ~30 days)** via PhotoKit
 (one-time **Photos** permission grant; macOS shows its own "Delete N?" confirmation).
 
+### Residual risk: initial-write integrity
+
+This tool verifies every backup copy by **content hash** (SHA-256 — whole-file for files
+≤16 MiB, sampled windows for larger videos). That is strictly stronger than osxphotos, which
+compares only file size and modification time and is **blind to same-size content corruption**.
+The hash catches **all** corruption that happens *after* a copy lands on the PC (it's re-checked
+before any deletion).
+
+The one case it cannot catch is a corruption that occurs **during the very first write** to the
+share, before the copy is fingerprinted — that copy is recorded as its own (corrupt) baseline, so
+later checks see it as unchanged. For this to cause loss, a write would have to be corrupted in a
+way that (a) defeats SMB3 packet signing and TCP checksums, (b) preserves the exact file length,
+and (c) is reported by the OS as a complete, successful write — any size change or short write
+instead produces an error and the original is **not** eligible for deletion. The only realistic
+carrier is failing RAM or a bad cable (which would usually corrupt other work visibly too).
+
+**Why it's accepted, not coded around:** even then, loss is neither silent nor permanent — deletion
+is opt-in and a separate step, you can open the copied photos on the PC first (the menu bar reveals
+representative files), and originals stay recoverable in Photos → Recently Deleted for ~30 days. The
+net risk is **smaller than the PC's own disk silently bit-rotting the sole copy** over time, which
+no backup tool can prevent. Every code mitigation considered (researched in depth) was either
+near-inert under this tool's metadata-embedding defaults or would itself risk *refusing valid
+backups* — worse than the rare, recoverable gap it would close.
+
 ## What CI proves (and what it can't)
 
 CI runs on GitHub's macOS runners, which are genuinely Apple Silicon (arm64):

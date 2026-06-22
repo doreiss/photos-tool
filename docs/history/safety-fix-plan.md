@@ -1,5 +1,13 @@
 # photos-tool safety fix plan (from triage+design workflow wf_2b95fb6a-6d1)
 
+> **RESOLVED (2026-06-21).** The content-addressed verify-before-delete gate shipped (state.py).
+> The lone residual — *initial-write* integrity (a corruption baked into the baseline before the
+> first fingerprint) — was researched in depth: osxphotos has no native verify (its export copy is a
+> bare `shutil.copy`, signatures are size+mtime only), our content hash is strictly stronger, and the
+> risk is bounded by SMB3 signing + exact-length + ACK-complete and is ~30-day recoverable. Verdict:
+> **document, don't code** — every mitigation was near-inert under the `--exiftool`/`--touch-file`
+> defaults or risked refusing valid backups. See README → "Residual risk: initial-write integrity".
+
 Status: DESIGN COMPLETE, awaiting owner sign-off on open questions, then implement.
 
 ## Verdict: auditing the audit changed the picture
