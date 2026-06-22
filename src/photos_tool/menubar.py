@@ -451,6 +451,9 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
 
         @rumps.clicked("Send Album…")
         def send_album(self, _: Any) -> None:
+            if not default_config_path().exists():  # onboard first, like Send Selected / Clean up
+                self._run_setup()
+                return
             # Collect input on the main thread BEFORE enqueueing the job.
             album = self._ask_text("Album name to send:", "Send Album")
             if album:
