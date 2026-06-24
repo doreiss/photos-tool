@@ -24,7 +24,7 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: pyright
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "stable"
       - run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
