@@ -50,5 +50,5 @@ addopts = "-q"
 markers = [
   "requires_sips: needs the macOS sips image tool",
   "requires_exiftool: needs the real exiftool binary",
-  "requires_ffmpeg: needs the real ffmpeg/ffprobe binaries",
+  "requires_avconvert: needs macOS's built-in avconvert",
 ]

@@ -77,7 +77,9 @@ _MESSAGES = {
     ),
     EXIT_NOTHING_SELECTED: Notification("Nothing selected", "Pick photos in Photos first."),
     EXIT_CONVERSION: Notification(
-        "Sent, but a copy failed", "Your originals were sent; a JPEG/MP4 copy failed."
+        "A conversion failed",
+        "Some photos or videos couldn't be converted, so nothing from this send will be removed "
+        "from your Mac. Send again; if it keeps failing, Run Diagnostics.",
     ),
     EXIT_PREFLIGHT: Notification(
         "Can't send yet", "Check tools, the share, and Full Disk Access — Run Diagnostics."
@@ -202,17 +204,65 @@ def build_connect_argv(
     smb_url: str,
     *,
     config: str | None = None,
+    export_format: str = "viewable",
 ) -> list[str]:
     """Build the ``photos-tool connect`` argv for the GUI setup flow.
 
     ``--force`` is always passed: "Set up connection…" is a deliberate user action, and
     the GUI confirms a reconnect before calling this. ``--json`` gives a parseable result.
+    ``--format`` is always explicit so a reconnect never silently keeps a stale choice.
     """
     argv = [*cli_prefix, "connect", "--smb-url", smb_url]
     if config:
         argv += ["--config", config]
-    argv += ["--json", "--force"]
+    argv += ["--format", export_format, "--json", "--force"]
     return argv
+
+
+# Setup asks once how photos should land on the PC (config export.format). "Viewable" is the default
+# button; the text spells out what it gives up, since Clean up later deletes the Mac originals
+# against whatever was sent.
+FORMAT_PROMPT_TITLE = "How should photos be saved on the PC?"
+FORMAT_PROMPT_TEXT = (
+    "Viewable — photos as JPEG and videos as MP4, so everything opens on any Windows PC (the "
+    "edited version, if you edited it). Live Photo motion isn't kept, and Clean up replaces your "
+    "Mac's originals with these copies.\n\n"
+    "Original files — the untouched iPhone files (HEIC/HEVC): smallest and complete, but Windows "
+    "needs Microsoft add-ons to show them."
+)
+FORMAT_BUTTON_ORIGINAL = "Original files"
+FORMAT_BUTTON_VIEWABLE = "Viewable"
+
+
+def applescript_quote(value: str) -> str:
+    """A safe AppleScript string literal (backslashes and quotes escaped)."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def text_dialog_script(prompt: str, title: str, default: str = "") -> str:
+    """AppleScript for macOS's own text-entry dialog; prints the entered text."""
+    q = applescript_quote
+    return (
+        f"text returned of (display dialog {q(prompt)} "
+        f"default answer {q(default)} with title {q(title)})"
+    )
+
+
+def choice_dialog_script(prompt: str, title: str, buttons: list[str], default: str) -> str:
+    """AppleScript for macOS's own button dialog; prints the clicked button's label."""
+    q = applescript_quote
+    return (
+        f"button returned of (display dialog {q(prompt)} "
+        f"buttons {{{', '.join(q(b) for b in buttons)}}} "
+        f"default button {q(default)} with title {q(title)})"
+    )
+
+
+def format_for_choice(button: str | None) -> str | None:
+    """Map the setup dialog's button to an export.format value; None if cancelled/unknown."""
+    return {FORMAT_BUTTON_ORIGINAL: "original", FORMAT_BUTTON_VIEWABLE: "viewable"}.get(
+        button or ""
+    )
 
 
 def parse_connect_result(stdout: str) -> ConnectResult:

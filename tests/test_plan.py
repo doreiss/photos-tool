@@ -47,3 +47,14 @@ def test_use_photokit_can_modify_download_missing():
     cmd = build_export_command(ExportOptions(destination="/d", use_photokit=True))
     assert "--use-photokit" in cmd
     assert "--download-missing" in cmd
+
+
+def test_jpeg_archive_flags_are_emitted_only_when_set():
+    default = build_export_command(ExportOptions(destination="/Volumes/Share"))
+    assert "--skip-original-if-edited" not in default
+    assert "--skip-raw" not in default
+    cmd = build_export_command(
+        ExportOptions(destination="/Volumes/Share", skip_original_if_edited=True, skip_raw=True)
+    )
+    assert "--skip-original-if-edited" in cmd
+    assert "--skip-raw" in cmd

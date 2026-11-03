@@ -16,12 +16,10 @@ def main() -> int:
         return 0
     if tool == "osxphotos":
         return _osxphotos(scenario)
-    if tool == "ffprobe":
-        return _ffprobe(scenario)
-    if tool == "ffmpeg":
-        return _ffmpeg(scenario)
+    if tool == "avconvert":
+        return _avconvert(scenario)
     if tool == "exiftool":
-        return 0
+        return _exiftool(scenario)
     if tool == "osascript":
         return _osascript(scenario)
     if tool == "mount":
@@ -41,6 +39,13 @@ def _osxphotos(scenario: dict) -> int:
             # Mirror real osxphotos: empty selection exits non-zero with a help message.
             print("--selected option used but no photos selected in Photos.", file=sys.stderr)
             return 1
+        if "--print" in args:  # list_asset_uuids: one UUID per selected item
+            uuids = scenario.get("uuids")
+            if uuids is None:  # derive from the files (uuid = file stem), like the report rows
+                uuids = list(dict.fromkeys(Path(rel).stem for rel in scenario.get("files", [])))
+            for uuid in uuids[:count]:
+                print(uuid)
+            return 0
         print(count)
         return 0
     if args[:1] == ["export"]:
@@ -54,7 +59,7 @@ def _osxphotos(scenario: dict) -> int:
         if scenario.get("invalid_report") and not dry_run and destination.name != "compat":
             report_path.write_text("{not-json", encoding="utf-8")
         else:
-            report = _pick_report(scenario, destination, dry_run)
+            report = [r for r in _pick_report(scenario, destination, dry_run) if _kind_ok(r)]
             if not dry_run and destination.name != "compat":
                 # Land each exported/already-present originals row as a real file on the share
                 # and point the row at it, so the report agrees with what is on disk — the delete
@@ -62,10 +67,9 @@ def _osxphotos(scenario: dict) -> int:
                 _materialize(report, destination)
             report_path.write_text(json.dumps(report), encoding="utf-8")
         if not dry_run:
-            only_photos = "--only-photos" in args
             for rel in _pick_files(scenario, destination):
-                # Mirror --only-photos: the compat pass never writes movies.
-                if only_photos and Path(rel).suffix.lower() in {".mov", ".m4v"}:
+                # Mirror --only-photos / --only-movies (the compat pass; the viewable split).
+                if not _kind_ok({"filename": rel}):
                     continue
                 path = destination / rel
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -74,6 +78,18 @@ def _osxphotos(scenario: dict) -> int:
             return int(scenario.get("jpeg_returncode", scenario.get("export_returncode", 0)))
         return int(scenario.get("export_returncode", 0))
     return 0
+
+
+MOVIE_SUFFIXES = {".mov", ".m4v", ".mp4"}
+
+
+def _kind_ok(row: dict) -> bool:
+    """Whether a row/file survives this export's --only-photos / --only-movies filter."""
+    args = sys.argv[1:]
+    is_movie = Path(str(row.get("filename") or "")).suffix.lower() in MOVIE_SUFFIXES
+    if "--only-photos" in args and is_movie:
+        return False
+    return not ("--only-movies" in args and not is_movie)
 
 
 def _pick_report(scenario: dict, destination: Path, dry_run: bool) -> list[dict]:
@@ -133,21 +149,62 @@ def _pick_files(scenario: dict, destination: Path) -> list[str]:
     return list(scenario.get(key, []))
 
 
-def _ffprobe(scenario: dict) -> int:
-    path = Path(sys.argv[-1])
-    codecs = scenario.get("codecs", {})
-    print(codecs.get(path.name, "hevc"))
-    return 0
+IDENTITY_TAG = "XMP-xmpMM:OriginalDocumentID"
+SIGNATURE_TAG = "XMP-xmpMM:InstanceID"
+_STAMP_LINES = {"identity=": "OriginalDocumentID", "signature=": "InstanceID"}
 
 
-def _ffmpeg(scenario: dict) -> int:
-    if scenario.get("ffmpeg_fail") and "-i" in sys.argv[1:]:
-        print("ffmpeg failed by scenario", file=sys.stderr)
-        return 1
-    output = Path(sys.argv[-1])
+def _avconvert(scenario: dict) -> int:
+    args = sys.argv[1:]
+    source = Path(args[args.index("--source") + 1])
+    output = Path(args[args.index("--output") + 1])
+    preset = args[args.index("--preset") + 1]
+    if _matches(scenario.get("avconvert_fail"), source) or (
+        preset == "PresetPassthrough" and _matches(scenario.get("passthrough_fail"), source)
+    ):
+        print("avconvert completed with error:-11800.", file=sys.stderr)
+        return 205
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text("mp4", encoding="utf-8")
+    output.write_text(f"mp4 {preset} of {source.name}\n", encoding="utf-8")
     return 0
+
+
+def _exiftool(scenario: dict) -> int:
+    """Codec reads, plus the MP4 identity/signature stamp stored IN the file (so it survives
+    os.replace, and is wiped when avconvert rewrites the file)."""
+    args = sys.argv[1:]
+    target = Path(args[-1])
+    if "-j" in args:  # read_stamp
+        record: dict = {"SourceFile": str(target)}
+        for line in target.read_text(encoding="utf-8").splitlines():
+            for prefix, key in _STAMP_LINES.items():
+                if line.startswith(prefix):
+                    record[key] = line.removeprefix(prefix)
+        print(json.dumps([record]))
+        return 0
+    if "-s3" in args and "-CompressorID" in args:
+        if target.suffix.lower() == ".mp4":  # a conversion's output
+            print(scenario.get("output_codec", "avc1"))
+        else:
+            print(scenario.get("codecs", {}).get(target.name, "hvc1"))
+        return 0
+    if "-tagsFromFile" in args and _matches(scenario.get("exiftool_tag_fail"), target):
+        print("exiftool failed by scenario", file=sys.stderr)
+        return 1
+    for arg in args:
+        for tag, prefix in ((IDENTITY_TAG, "identity="), (SIGNATURE_TAG, "signature=")):
+            if arg.startswith(f"-{tag}="):
+                with target.open("a", encoding="utf-8") as fh:
+                    fh.write(f"{prefix}{arg.split('=', 1)[1]}\n")
+    return 0
+
+
+def _matches(selector: object, path: Path) -> bool:
+    """A scenario failure switch: True (always) or a list of source/target names."""
+    if selector is True:
+        return True
+    names = {path.name, path.name.replace(".partial.mp4", ".mp4")}
+    return isinstance(selector, list) and bool(names & set(selector))
 
 
 def _osascript(scenario: dict) -> int:

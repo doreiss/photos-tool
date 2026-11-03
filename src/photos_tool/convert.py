@@ -1,8 +1,19 @@
-"""Compatibility-copy conversion helpers."""
+"""Windows-playable video conversion, using macOS's built-in ``avconvert``.
+
+``avconvert`` ships with every macOS and drives Apple's hardware encoder, so the .app needs no
+ffmpeg. H.264 sources are repackaged into MP4 losslessly (``PresetPassthrough``: the video
+bitstream is copied untouched); anything else — iPhone HEVC, HDR or not — is re-encoded to H.264
+High (``PresetHighestQuality``) at the source resolution, which any Windows PC plays without an
+add-on. ``avconvert`` strips capture date / GPS / camera tags (Apple's privacy filter), so they are
+copied back from the source with exiftool. Every output is assembled in a same-dir temp and
+published with ``os.replace`` only once complete, so a failure never leaves a half-made MP4 that a
+later run (or the deletion gate) would mistake for a finished copy.
+"""
 
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import subprocess
 from dataclasses import dataclass
@@ -10,11 +21,19 @@ from pathlib import Path
 
 VIDEO_SUFFIXES = {".mov", ".m4v"}
 STILL_SUFFIXES = {".heic", ".heif", ".jpg", ".jpeg"}
-HEVC_CODECS = {"hevc", "h265", "h.265"}
+# exiftool's QuickTime CompressorID (the sample-description fourcc).
+H264_CODECS = {"avc1", "avc3"}
+HEVC_CODECS = {"hvc1", "hev1", "dvh1", "dvhe"}  # incl. Dolby Vision HEVC sample entries
+# Stamped on every MP4 we publish: the Photos asset UUID it was made from, and a signature of the
+# exact source it was made from. A re-send recognises its own earlier output by the UUID (and never
+# mistakes a *different* video's same-named file for it), and remakes it if the signature shows the
+# video changed since (e.g. trimmed in Photos), so the deletion gate never trusts a stale copy.
+IDENTITY_TAG = "XMP-xmpMM:OriginalDocumentID"
+SIGNATURE_TAG = "XMP-xmpMM:InstanceID"
 
 
 class ConversionError(RuntimeError):
-    """Raised when a compatibility copy cannot be created."""
+    """Raised when a Windows-playable copy cannot be created."""
 
 
 @dataclass(frozen=True)
@@ -53,16 +72,13 @@ def is_live_photo_motion(video: Path) -> bool:
     )
 
 
-def convert_videos(
-    root: Path,
-    compat_root: Path,
-    crf: int = 20,
-) -> ConvertSummary:
-    """Transcode standalone HEVC videos in ``root`` to H.264 MP4s under ``compat_root``.
+def convert_videos(root: Path, compat_root: Path) -> ConvertSummary:
+    """Mirror standalone HEVC videos in ``root`` as H.264 MP4s under ``compat_root``.
 
-    The originals tree stays pristine; the Windows-friendly ``.mp4`` mirror lands in
-    ``compat_root`` at the same relative path. Live Photo motion clips are skipped.
-    ``_is_output_current`` keeps repeat runs idempotent without any on-disk cache.
+    The "original" format's optional compat mirror: the originals tree stays pristine and the
+    Windows-friendly ``.mp4`` lands in ``compat_root`` at the same relative path. Live Photo motion
+    clips and already-playable (non-HEVC) videos are skipped. ``_is_output_current`` keeps repeat
+    runs idempotent without any on-disk cache.
     """
     summary = ConvertSummary()
     for video in find_video_candidates(root):
@@ -77,67 +93,73 @@ def convert_videos(
         if codec not in HEVC_CODECS:
             summary = _add(summary, skipped=1)
             continue
-        transcode_to_mp4(video, output, crf=crf)
+        make_viewable_mp4(video, output, codec=codec)
         summary = _add(summary, transcoded=1)
     return summary
 
 
 def probe_video_codec(path: Path) -> str:
-    cmd = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=codec_name",
-        "-of",
-        "default=nokey=1:noprint_wrappers=1",
-        str(path),
-    ]
-    result = _run(cmd)
-    codec = result.stdout.strip().splitlines()
-    return codec[0].strip().lower() if codec else ""
+    """The video's QuickTime CompressorID (e.g. ``hvc1``, ``avc1``), lower-cased; ``""`` if none."""
+    result = _run(["exiftool", "-s3", "-CompressorID", str(path)])
+    lines = result.stdout.strip().splitlines()
+    return lines[0].strip().lower() if lines else ""
 
 
-def transcode_to_mp4(source: Path, output: Path, crf: int = 20) -> None:
-    output.parent.mkdir(parents=True, exist_ok=True)
-    # Transcode -> tag -> stamp into a SAME-DIR temp, then os.replace into place only after EVERY
-    # step succeeds. If any step fails the partial file is removed, so a metadata-incomplete MP4 is
-    # never left at the output path — otherwise _is_output_current (mtime>=source) would treat it as
-    # "current" forever and a metadata-stripped copy would ship. The temp keeps a .mp4 extension so
-    # ffmpeg's container auto-detect still works.
+def read_stamp(path: Path) -> tuple[str | None, str | None]:
+    """(Photos UUID, source signature) stamped on an MP4 we published; Nones if absent/foreign."""
+    try:
+        out = _run(["exiftool", "-j", f"-{IDENTITY_TAG}", f"-{SIGNATURE_TAG}", str(path)]).stdout
+        record = json.loads(out)[0]
+    except (ConversionError, ValueError, IndexError, TypeError):
+        return None, None
+    identity = record.get(IDENTITY_TAG.split(":")[-1])
+    signature = record.get(SIGNATURE_TAG.split(":")[-1])
+    return (str(identity) if identity else None, str(signature) if signature else None)
+
+
+def make_viewable_mp4(
+    source: Path,
+    output: Path,
+    *,
+    identity: str | None = None,
+    signature: str | None = None,
+    codec: str | None = None,
+) -> None:
+    """Write a Windows-playable H.264 MP4 of ``source`` to ``output``, atomically.
+
+    ``identity`` (a Photos UUID) and ``signature`` (of ``source``), when given, are stamped on the
+    file so a later run can recognise it and tell whether it is still current. ``codec`` skips a
+    probe the caller already did. An existing ``output`` is replaced only once the new one is whole.
+    """
+    # Same dir => same filesystem => os.replace is atomic. Keep a .mp4 extension: avconvert picks
+    # the container from it.
     tmp = output.with_name(output.stem + ".partial.mp4")
-    ffmpeg_cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(source),
-        "-c:v",
-        "libx264",
-        "-crf",
-        str(crf),
-        "-c:a",
-        "aac",
-        "-movflags",
-        "use_metadata_tags",
-        "-map_metadata",
-        "0",
-        str(tmp),
-    ]
-    exiftool_cmd = [
+    presets = ["PresetHighestQuality"]
+    if (codec if codec is not None else probe_video_codec(source)) in H264_CODECS:
+        # Lossless repackage first; fall back to a re-encode if the streams can't go in MP4 as-is.
+        presets.insert(0, "PresetPassthrough")
+    tag_cmd = [
         "exiftool",
         "-tagsFromFile",
         str(source),
         "-api",
         "QuickTimeUTC=1",
         "-all:all",
-        "-overwrite_original",
-        str(tmp),
     ]
+    if identity:
+        tag_cmd.append(f"-{IDENTITY_TAG}={identity}")
+    if signature:
+        tag_cmd.append(f"-{SIGNATURE_TAG}={signature}")
+    tag_cmd += ["-overwrite_original", str(tmp)]
     try:
-        _run(ffmpeg_cmd)
-        _run(exiftool_cmd)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        _avconvert(source, tmp, presets)
+        # The point of this file is that Windows can play it: refuse to publish anything that
+        # isn't H.264 (e.g. if a future macOS changed what a preset emits).
+        produced = probe_video_codec(tmp)
+        if produced not in H264_CODECS:
+            raise ConversionError(f"avconvert produced {produced or 'no'} video, not H.264")
+        _run(tag_cmd)
         stat = source.stat()
         os.utime(tmp, (stat.st_atime, stat.st_mtime))
         os.replace(tmp, output)  # atomic publish: the output appears only fully-formed
@@ -149,6 +171,29 @@ def transcode_to_mp4(source: Path, output: Path, crf: int = 20) -> None:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
         raise ConversionError(f"could not finalize {output}: {exc}") from exc
+
+
+def _avconvert(source: Path, output: Path, presets: list[str]) -> None:
+    error: ConversionError | None = None
+    for preset in presets:
+        try:
+            _run(
+                [
+                    "avconvert",
+                    "--source",
+                    str(source),
+                    "--output",
+                    str(output),
+                    "--preset",
+                    preset,
+                    "--replace",
+                ]
+            )
+            return
+        except ConversionError as exc:
+            error = exc
+    assert error is not None  # presets is never empty
+    raise error
 
 
 def _is_output_current(source: Path, output: Path) -> bool:

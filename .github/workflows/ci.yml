@@ -95,7 +95,7 @@ jobs:
         run: pytest
       - name: Install the real external toolchain
         run: |
-          brew install exiftool ffmpeg
+          brew install exiftool
           # osxphotos==0.76.1 is already installed by `pip install -e ".[dev]"` above
           # (pinned in pyproject's darwin core dep) — pyproject is the single source of truth.
       - name: Smoke-test the toolchain on a clean arm64 Mac
@@ -105,7 +105,7 @@ jobs:
           python -c "import sys; assert sys.version_info >= (3, 10); print('python', sys.version)"
           osxphotos --version
           exiftool -ver
-          ffmpeg -version
+          test -x /usr/bin/avconvert && echo "avconvert: /usr/bin/avconvert (built into macOS; no ffmpeg needed)"
           photos-tool check
       - name: Run marker-gated real-tool tests
-        run: pytest -m "requires_sips or requires_exiftool or requires_ffmpeg"
+        run: pytest -m "requires_sips or requires_exiftool or requires_avconvert"

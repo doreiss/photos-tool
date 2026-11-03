@@ -41,6 +41,7 @@ def write_config(
     jpeg: bool = False,
     mp4: bool = False,
     use_photokit: bool = False,
+    export_format: str = "original",
 ) -> Path:
     # Preferences are config-only now, so tests configure JPEG/MP4/PhotoKit here.
     config = tmp_path / "config.toml"
@@ -57,6 +58,7 @@ filename_template = "{{original_name}}"
 download_missing = true
 use_photokit = {str(use_photokit).lower()}
 retry = 3
+format = {export_format!r}
 
 [copies]
 jpeg = {str(jpeg).lower()}
@@ -486,23 +488,21 @@ def test_send_mp4_transcodes_standalone_hevc_only(tmp_path: Path, fake_tools):
                 "2024/01/IMG_0001.MOV",
                 "2024/01/VID_0002.MOV",
             ],
-            codecs={"IMG_0001.MOV": "hevc", "VID_0002.MOV": "hevc"},
+            codecs={"IMG_0001.MOV": "hvc1", "VID_0002.MOV": "hvc1"},
         )
     )
 
     assert cli.main(["send", "--config", str(config)]) == 0
     log = tools.log()
-    ffmpeg_calls = [
-        entry["argv"] for entry in log if entry["tool"] == "ffmpeg" and "-i" in entry["argv"]
-    ]
+    avconvert_calls = [entry["argv"] for entry in log if entry["tool"] == "avconvert"]
     exiftool_calls = [
         entry["argv"]
         for entry in log
         if entry["tool"] == "exiftool" and "-tagsFromFile" in entry["argv"]
     ]
-    assert len(ffmpeg_calls) == 1
-    assert "VID_0002.MOV" in " ".join(ffmpeg_calls[0])
-    assert "IMG_0001.MOV" not in " ".join(ffmpeg_calls[0])
+    assert len(avconvert_calls) == 1
+    assert "VID_0002.MOV" in " ".join(avconvert_calls[0])
+    assert "IMG_0001.MOV" not in " ".join(avconvert_calls[0])  # Live Photo motion is skipped
     assert len(exiftool_calls) == 1
     assert "-overwrite_original" in exiftool_calls[0]
     # exiftool tags the same-dir temp; the final .mp4 is atomically published only after every step.
@@ -524,25 +524,21 @@ def test_send_jpeg_mp4_transcodes_from_main_tree_into_compat(tmp_path: Path, fak
             # --only-photos means the compat pass would not write this movie; the fake
             # honours that, so the only video on disk is in the pristine main tree.
             jpeg_files=["2024/01/IMG_0001.jpeg", "2024/01/VID_0002.MOV"],
-            codecs={"VID_0002.MOV": "hevc"},
+            codecs={"VID_0002.MOV": "hvc1"},
         )
     )
 
     assert cli.main(["send", "--config", str(config)]) == 0
 
-    ffmpeg_calls = [
-        entry["argv"]
-        for entry in tools.log()
-        if entry["tool"] == "ffmpeg" and "-i" in entry["argv"]
-    ]
-    assert len(ffmpeg_calls) == 1
-    argv = ffmpeg_calls[0]
-    source = argv[argv.index("-i") + 1]
-    output = argv[-1]
+    avconvert_calls = [e["argv"] for e in tools.log() if e["tool"] == "avconvert"]
+    assert len(avconvert_calls) == 1
+    argv = avconvert_calls[0]
+    source = argv[argv.index("--source") + 1]
+    output = argv[argv.index("--output") + 1]
     # Source is the pristine original; the H.264 copy lands in the compat/ mirror.
     assert source.endswith("2024/01/VID_0002.MOV")
     assert "/compat/" not in source
-    # ffmpeg writes a same-dir temp; the final .mp4 is published atomically once tagging succeeds.
+    # avconvert writes a same-dir temp; the final .mp4 is published atomically once tagged.
     assert output.endswith("/compat/2024/01/VID_0002.partial.mp4")
     assert (mount / "compat" / "2024" / "01" / "VID_0002.mp4").exists()
     # The compat pass never created a video to re-transcode.
@@ -559,8 +555,8 @@ def test_send_mp4_conversion_error_exits_five(tmp_path: Path, fake_tools, capsys
             selected=1,
             report=[row("video")],
             files=["2024/01/VID_0002.MOV"],
-            codecs={"VID_0002.MOV": "hevc"},
-            ffmpeg_fail=True,
+            codecs={"VID_0002.MOV": "hvc1"},
+            avconvert_fail=True,
         )
     )
 
@@ -1129,3 +1125,245 @@ def test_send_rejects_concurrent_run_for_same_destination(tmp_path: Path, fake_t
     assert rc == 1
     assert "already running" in captured.err
     assert osxphotos_exports(tools.log()) == []
+
+
+VIEWABLE_FILES = ["2024/01/IMG_0001.HEIC", "2024/01/VID_0002.MOV"]
+
+
+def _viewable(tmp_path: Path, **config_kw: Any) -> tuple[Path, Path]:
+    mount = tmp_path / "share"
+    mount.mkdir(exist_ok=True)
+    return mount, write_config(tmp_path, mount, export_format="viewable", **config_kw)
+
+
+def _viewable_scenario(mount: Path, **overrides: Any) -> dict[str, Any]:
+    # No canned report: rows are derived from the files each pass actually writes, so the photo
+    # and video passes each see only their own kind (as real osxphotos does).
+    result = scenario(mount, selected=2, files=VIEWABLE_FILES, **overrides)
+    result.pop("report")
+    return result
+
+
+def _token(tmp_path: Path, mount: Path):
+    from photos_tool import state
+
+    return state.load_backup_token(tmp_path / "state" / "logs", mount)
+
+
+def test_viewable_send_makes_jpeg_photos_and_mp4_videos_and_arms_cleanup(tmp_path, fake_tools):
+    from photos_tool import convert, state
+
+    # copies.jpeg/mp4 on: the "original"-format compat mirror must still never run in viewable.
+    mount, config = _viewable(tmp_path, jpeg=True, mp4=True)
+    tools = fake_tools(_viewable_scenario(mount))
+
+    assert cli.main(["send", "--config", str(config)]) == 0
+
+    photo_pass, video_pass = osxphotos_exports(tools.log())
+    # Photo pass: straight to the share, JPEG, edited-only, no Live motion/RAW, no videos.
+    assert Path(photo_pass[1]) == mount
+    for flag in ("--only-photos", "--convert-to-jpeg", "--skip-live", "--skip-original-if-edited"):
+        assert flag in photo_pass
+    # Video pass: videos only, edited-only, into local scratch (not the share), no exiftool
+    # rewrite (keeps the copy an APFS clone), and no persistent export DB.
+    assert "--only-movies" in video_pass and "--skip-original-if-edited" in video_pass
+    assert "--exiftool" not in video_pass and "--update" not in video_pass
+    assert mount not in Path(video_pass[1]).parents
+    assert not any("compat" in argv[1] for argv in (photo_pass, video_pass))
+
+    mp4 = mount / "2024" / "01" / "VID_0002.mp4"
+    assert mp4.exists()
+    assert convert.read_stamp(mp4)[0] == "VID_0002"  # stamped with its Photos UUID
+    assert not list(mount.rglob("*.MOV"))  # no original video on the share
+    # The token cleanup trusts records the very files that back each original: the MP4 + photo.
+    token = _token(tmp_path, mount)
+    assert token is not None
+    recorded = {a.uuid: [f.path for f in a.files] for a in token.assets}
+    assert recorded == {
+        "IMG_0001": [str(mount / "2024" / "01" / "IMG_0001.HEIC")],
+        "VID_0002": [str(mp4)],
+    }
+    removable, kept = state.removable_assets(token)
+    assert sorted(removable) == ["IMG_0001", "VID_0002"] and kept == []
+
+
+def test_viewable_resend_reuses_its_mp4_instead_of_converting_again(tmp_path, fake_tools):
+    mount, config = _viewable(tmp_path)
+    tools = fake_tools(_viewable_scenario(mount))
+
+    assert cli.main(["send", "--config", str(config)]) == 0
+    assert cli.main(["send", "--config", str(config)]) == 0
+
+    assert len([e for e in tools.log() if e["tool"] == "avconvert"]) == 1  # converted once
+    assert sorted(p.name for p in (mount / "2024" / "01").glob("VID_0002*")) == ["VID_0002.mp4"]
+    token = _token(tmp_path, mount)
+    assert token is not None and len(token.assets) == 2
+
+
+def test_viewable_never_mistakes_another_videos_mp4_for_this_one(tmp_path, fake_tools):
+    # Safety: cleanup deletes an original against "its" MP4. A different video that happens to
+    # have the same name (another clip.mov in the same month) must never be reused or overwritten.
+    from photos_tool import convert
+
+    mount, config = _viewable(tmp_path)
+    foreign = mount / "2024" / "01" / "VID_0002.mp4"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text("someone else's video\nidentity=OTHER-UUID\n", encoding="utf-8")
+    fake_tools(_viewable_scenario(mount))
+
+    assert cli.main(["send", "--config", str(config)]) == 0
+
+    ours = mount / "2024" / "01" / "VID_0002 (1).mp4"
+    assert convert.read_stamp(ours)[0] == "VID_0002"
+    assert convert.read_stamp(foreign)[0] == "OTHER-UUID"  # untouched
+    token = _token(tmp_path, mount)
+    assert token is not None
+    video = next(a for a in token.assets if a.uuid == "VID_0002")
+    assert [f.path for f in video.files] == [str(ours)]
+
+
+def test_viewable_failed_conversion_is_not_backed_up_and_arms_nothing(tmp_path, fake_tools, capsys):
+    mount, config = _viewable(tmp_path)
+    fake_tools(_viewable_scenario(mount, avconvert_fail=True))
+
+    rc = cli.main(["send", "--config", str(config)])
+    captured = capsys.readouterr()
+
+    assert rc == cli.EXIT_CONVERSION
+    assert "could not be converted" in captured.out
+    assert "iCloud" not in captured.out  # not the generic "skipped" explanation
+    assert not list(mount.rglob("*.mp4"))  # nothing half-made published
+    assert _token(tmp_path, mount) is None  # all-or-nothing: cleanup is not armed
+
+
+def test_viewable_dry_run_counts_videos_and_converts_nothing(tmp_path, fake_tools, capsys):
+    mount, config = _viewable(tmp_path)
+    tools = fake_tools(
+        scenario(
+            mount,
+            selected=2,
+            uuids=["IMG_0001", "VID_0002"],
+            dry_report=[row("IMG_0001"), {**row("VID_0002"), "filename": "/fake/VID_0002.MOV"}],
+        )
+    )
+
+    assert cli.main(["send", "--config", str(config), "--dry-run"]) == 0
+    captured = capsys.readouterr()
+
+    assert "All 2 selected" in captured.out  # photo + video passes reconcile together
+    assert not [e for e in tools.log() if e["tool"] == "avconvert"]
+    assert not list(mount.rglob("*.mp4"))
+
+
+def test_original_format_sends_untouched_files(tmp_path: Path, fake_tools):
+    mount = tmp_path / "share"
+    mount.mkdir()
+    config = write_config(tmp_path, mount, export_format="original")
+    tools = fake_tools(scenario(mount))
+
+    assert cli.main(["send", "--config", str(config)]) == 0
+    (argv,) = osxphotos_exports(tools.log())  # one pass, no video pass
+    for flag in ("--convert-to-jpeg", "--skip-live", "--skip-original-if-edited", "--only-photos"):
+        assert flag not in argv
+
+
+def test_viewable_send_announces_its_format_and_logs_video_conversions(
+    tmp_path, fake_tools, capsys
+):
+    # The format decides what cleanup later deletes against, so a send must never hide it.
+    mount, config = _viewable(tmp_path)
+    fake_tools(_viewable_scenario(mount))
+
+    assert cli.main(["send", "--config", str(config)]) == 0
+
+    assert "Format: viewable" in capsys.readouterr().out
+    last_run = json.loads((tmp_path / "state" / "logs" / "last-run.json").read_text())
+    assert last_run["mp4"] == 1  # the video pass's conversions are counted
+
+
+def test_doctor_requires_avconvert_when_the_config_makes_mp4s(
+    tmp_path, fake_tools, capsys, monkeypatch
+):
+    from photos_tool import tooling
+
+    mount, config = _viewable(tmp_path)
+    fake_tools(scenario(mount, selected=0))
+
+    def no_avconvert(name: str) -> str | None:
+        return None if name == "avconvert" else f"/fake/{name}"
+
+    monkeypatch.setattr(cli, "probe_all", lambda: tooling.probe_all(which=no_avconvert))
+
+    rc = cli.main(["doctor", "--config", str(config)])
+    out = capsys.readouterr().out
+
+    assert "[info] format: viewable" in out
+    assert "[fail] tool avconvert" in out
+    assert rc != 0
+
+
+def test_doctor_gauges_cloud_only_risk_across_videos_too(tmp_path, fake_tools, capsys):
+    # The viewable photo pass is --only-photos; the risk dry run must not inherit that filter, or a
+    # selection of cloud-only videos would read as 0% missing.
+    mount, config = _viewable(tmp_path)
+    tools = fake_tools(scenario(mount, selected=1, dry_report=[row("asset-1")]))
+
+    cli.main(["doctor", "--config", str(config)])
+
+    dry_runs = [a for a in osxphotos_exports(tools.log()) if "--dry-run" in a]
+    assert dry_runs and all("--only-photos" not in a for a in dry_runs)
+
+
+def test_viewable_freezes_the_selection_once_for_both_passes(tmp_path, fake_tools):
+    # Clicking around in Photos during a long send must not change what the video pass sends:
+    # the selection is read ONCE and both exports run on that frozen UUID list.
+    mount, config = _viewable(tmp_path)
+    tools = fake_tools(_viewable_scenario(mount))
+
+    assert cli.main(["send", "--config", str(config)]) == 0
+
+    queries = [
+        e["argv"] for e in tools.log() if e["tool"] == "osxphotos" and e["argv"][0] == "query"
+    ]
+    assert len(queries) == 1 and "--print" in queries[0]  # one read of the live selection
+    photo_pass, video_pass = osxphotos_exports(tools.log())
+    for argv in (photo_pass, video_pass):
+        assert "--selected" not in argv
+    frozen = photo_pass[photo_pass.index("--uuid-from-file") + 1]
+    assert video_pass[video_pass.index("--uuid-from-file") + 1] == frozen
+
+
+def test_viewable_checks_the_photo_report_before_converting_videos(tmp_path, fake_tools):
+    mount, config = _viewable(tmp_path)
+    tools = fake_tools(_viewable_scenario(mount, invalid_report=True))
+
+    assert cli.main(["send", "--config", str(config)]) == cli.EXIT_PREFLIGHT
+    assert len(osxphotos_exports(tools.log())) == 1  # the video pass never started
+    assert not [e for e in tools.log() if e["tool"] == "avconvert"]
+
+
+def test_viewable_failure_message_keeps_the_icloud_hint_when_photos_were_also_missing(
+    tmp_path, fake_tools, capsys
+):
+    mount, config = _viewable(tmp_path)
+    fake_tools(
+        scenario(
+            mount,
+            selected=3,
+            uuids=["IMG_0001", "VID_0002", "IMG_0003"],
+            report=[
+                row("IMG_0001"),
+                {**row("VID_0002"), "filename": "/fake/VID_0002.MOV"},
+                row("IMG_0003", exported=False, new=False, missing=True),
+            ],
+            files=[],
+            avconvert_fail=True,
+        )
+    )
+
+    rc = cli.main(["send", "--config", str(config)])
+    out = capsys.readouterr().out
+
+    assert rc == cli.EXIT_CONVERSION
+    assert "could not be converted" in out
+    assert "iCloud" in out  # the cloud-only photo is still explained

@@ -231,3 +231,50 @@ def test_install_shortcut_maps_exit_codes_to_human_messages(tmp_path):
 def test_no_subcommand_errors():
     with pytest.raises(SystemExit):
         cli.main([])
+
+
+def test_init_writes_the_chosen_format_and_it_round_trips(tmp_path):
+    from photos_tool.config import load_config
+
+    for fmt in ("viewable", "original"):
+        path = tmp_path / f"{fmt}.toml"
+        rc = cli.main(
+            [
+                "init",
+                "--non-interactive",
+                "--config",
+                str(path),
+                "--smb-url",
+                "smb://192.168.1.50/FamilyPhotos",
+                "--mount-point",
+                "/Volumes/FamilyPhotos",
+                "--format",
+                fmt,
+            ]
+        )
+        assert rc == 0
+        assert load_config(path).export.format == fmt
+
+
+def test_reinit_without_format_keeps_an_existing_choice(tmp_path):
+    # Re-running init/connect (e.g. to change the share) must not quietly flip "original" to the
+    # viewable default — the format decides what cleanup deletes against.
+    from photos_tool.config import load_config
+
+    path = tmp_path / "config.toml"
+    base = [
+        "init",
+        "--non-interactive",
+        "--config",
+        str(path),
+        "--smb-url",
+        "smb://192.168.1.50/FamilyPhotos",
+        "--mount-point",
+        "/Volumes/FamilyPhotos",
+    ]
+    assert cli.main([*base, "--format", "original"]) == 0
+    assert cli.main([*base, "--force"]) == 0
+    assert load_config(path).export.format == "original"
+    fresh = tmp_path / "fresh.toml"
+    assert cli.main([*base[:3], str(fresh), *base[4:]]) == 0
+    assert load_config(fresh).export.format == "viewable"  # new configs get the default

@@ -65,6 +65,36 @@ def count_assets(scope: str = "selected", album: str | None = None, timeout: flo
     raise OsxphotosError("osxphotos returned no count")
 
 
+def list_asset_uuids(
+    scope: str = "selected", album: str | None = None, timeout: float = 120
+) -> list[str]:
+    """The UUIDs of the selection (or album), read ONCE.
+
+    A send that runs more than one export (the "viewable" photo + video passes) runs them all on
+    this frozen list, so clicking around in Photos during a long send can't change what is sent.
+    """
+    cmd = ["osxphotos", "query"]
+    if scope == "selected":
+        cmd.append("--selected")
+    elif scope == "album" and album:
+        cmd += ["--album", album]
+    else:
+        raise ValueError("scope must be 'selected' or an album name must be provided")
+    cmd += ["--quiet", "--print", "{uuid}"]
+
+    result = _run(cmd, timeout=timeout)
+    if result.returncode != 0:
+        combined = f"{result.stdout}\n{result.stderr}".lower()
+        if scope == "selected" and "no photos selected" in combined:
+            return []  # osxphotos exits non-zero on an empty selection: zero, not an error
+        _raise_osxphotos(cmd, result)
+    seen: dict[str, None] = {}  # ordered de-dup
+    for line in result.stdout.splitlines():
+        if line.strip():
+            seen[line.strip()] = None
+    return list(seen)
+
+
 def run_export(
     opts: ExportOptions,
     report_path: Path,

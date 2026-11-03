@@ -23,7 +23,8 @@ class Tool:
     version_args: tuple[str, ...] = ("--version",)
 
 
-# osxphotos and exiftool are mandatory; ffmpeg is only needed for optional MP4 copies.
+# osxphotos and exiftool are mandatory. avconvert (built into every macOS) makes the MP4s; send
+# requires it only when a send will make MP4s, so the CLI still runs where it is absent (e.g. CI).
 REQUIRED_TOOLS: tuple[Tool, ...] = (
     Tool("osxphotos", required=True, purpose="export selected photos from the Photos library"),
     Tool(
@@ -32,8 +33,12 @@ REQUIRED_TOOLS: tuple[Tool, ...] = (
         purpose="embed and verify EXIF, GPS and date metadata",
         version_args=("-ver",),  # exiftool prints just the version number for -ver
     ),
-    Tool("ffmpeg", required=False, purpose="transcode HEVC video to H.264 MP4 (optional copies)"),
-    Tool("ffprobe", required=False, purpose="detect source video codec for optional MP4 copies"),
+    Tool(
+        "avconvert",
+        required=False,
+        purpose="convert videos to Windows-playable H.264 MP4 (built into macOS)",
+        version_args=(),  # no version flag; doctor shows its path instead
+    ),
 )
 
 
@@ -80,7 +85,7 @@ def probe(tool: Tool, which: Callable[[str], str | None] = shutil.which) -> Tool
             return ToolStatus(tool=tool, path=argv[0], version=_query_version(argv))
 
     path = which(tool.name)
-    version = _query_version([path, *tool.version_args]) if path else None
+    version = _query_version([path, *tool.version_args]) if path and tool.version_args else None
     return ToolStatus(tool=tool, path=path, version=version)
 
 

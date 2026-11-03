@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from photos_tool.convert import transcode_to_mp4
+from photos_tool.convert import make_viewable_mp4, read_stamp
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -58,79 +58,59 @@ def test_real_sips_fixture_heic_to_jpeg_metadata_smoke(tmp_path: Path):
     assert "149" in str(metadata["GPSLongitude"])
 
 
-@pytest.mark.requires_ffmpeg
+@pytest.mark.requires_avconvert
 @pytest.mark.requires_exiftool
-def test_real_ffmpeg_transcode_preserves_quicktime_metadata(tmp_path: Path):
-    ffmpeg = shutil.which("ffmpeg")
-    ffprobe = shutil.which("ffprobe")
+def test_real_avconvert_turns_iphone_hevc_into_windows_playable_h264(tmp_path: Path):
+    # The "viewable" promise on real tools: an iPhone-style HEVC clip (10-bit, AAC, date/GPS/model
+    # tags) becomes an H.264 MP4 with its tags restored and our identity stamped in.
+    exiftool = _require_avconvert_and_exiftool()
+    source = tmp_path / "clip.mov"
+    shutil.copy2(FIXTURES / "sample_hevc.mov", source)
+    output = tmp_path / "share" / "clip.mp4"
+
+    make_viewable_mp4(source, output, identity="REAL-UUID-1")
+
+    meta = _exif_json(
+        exiftool,
+        output,
+        "-api",
+        "QuickTimeUTC=1",
+        "-FileType",
+        "-CompressorID",
+        "-ImageSize",
+        "-CreateDate",
+        "-GPSCoordinates",
+        "-Model",
+    )
+    assert meta["FileType"] == "MP4"
+    assert meta["CompressorID"] == "avc1"  # H.264: plays on a stock Windows PC
+    assert meta["ImageSize"] == "160x96"  # source resolution kept
+    assert "2024:08:05" in str(meta["CreateDate"])  # capture date, not the conversion time
+    assert "61" in str(meta["GPSCoordinates"]) and "149" in str(meta["GPSCoordinates"])
+    assert meta["Model"] == "iPhone 15 Pro"
+    assert read_stamp(output)[0] == "REAL-UUID-1"
+    assert not list(output.parent.glob("*.partial.mp4"))
+
+
+@pytest.mark.requires_avconvert
+@pytest.mark.requires_exiftool
+def test_real_avconvert_repackages_h264_without_reencoding(tmp_path: Path):
+    exiftool = _require_avconvert_and_exiftool()
+    source = tmp_path / "old.mov"
+    shutil.copy2(FIXTURES / "sample_h264.mov", source)
+    output = tmp_path / "old.mp4"
+
+    make_viewable_mp4(source, output)
+
+    meta = _exif_json(exiftool, output, "-FileType", "-CompressorID", "-ImageSize")
+    assert (meta["FileType"], meta["CompressorID"], meta["ImageSize"]) == ("MP4", "avc1", "160x96")
+
+
+def _require_avconvert_and_exiftool() -> str:
     exiftool = shutil.which("exiftool")
-    if not ffmpeg or not ffprobe or not exiftool:
-        pytest.skip("ffmpeg, ffprobe, and exiftool are required")
-
-    encoder = _hevc_encoder(ffmpeg)
-    if not encoder:
-        pytest.skip("ffmpeg has no available HEVC encoder")
-
-    source = tmp_path / "source.mov"
-    output = tmp_path / "source.mp4"
-    subprocess.run(
-        [
-            ffmpeg,
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc=duration=1:size=32x32:rate=1",
-            "-c:v",
-            encoder,
-            "-pix_fmt",
-            "yuv420p",
-            str(source),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    subprocess.run(
-        [
-            exiftool,
-            "-overwrite_original",
-            "-QuickTime:CreateDate=2024:01:02 03:04:05",
-            str(source),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-
-    transcode_to_mp4(source, output, crf=28)
-
-    codec = subprocess.run(
-        [
-            ffprobe,
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=codec_name",
-            "-of",
-            "default=nokey=1:noprint_wrappers=1",
-            str(output),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    metadata = subprocess.run(
-        [exiftool, "-s3", "-QuickTime:CreateDate", str(output)],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-
-    assert codec == "h264"
-    assert "2024:01:02" in metadata
+    if not shutil.which("avconvert") or not exiftool:
+        pytest.skip("avconvert (macOS) and exiftool are required")
+    return exiftool
 
 
 def _exif_json(exiftool: str, path: Path, *tags: str) -> dict[str, object]:
@@ -146,18 +126,3 @@ def _exif_json(exiftool: str, path: Path, *tags: str) -> dict[str, object]:
     row = rows[0]
     assert isinstance(row, dict)
     return row
-
-
-def _hevc_encoder(ffmpeg: str) -> str | None:
-    result = subprocess.run(
-        [ffmpeg, "-hide_banner", "-encoders"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    encoders = result.stdout
-    if "libx265" in encoders:
-        return "libx265"
-    if "hevc_videotoolbox" in encoders:
-        return "hevc_videotoolbox"
-    return None

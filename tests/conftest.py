@@ -36,7 +36,7 @@ def fake_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         bin_dir.mkdir()
         scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
         fakebin = Path(__file__).parent / "fakebin" / "tool.py"
-        for name in ("osxphotos", "exiftool", "ffmpeg", "ffprobe", "osascript", "mount"):
+        for name in ("osxphotos", "exiftool", "avconvert", "osascript", "mount"):
             shim = bin_dir / name
             shim.write_text(
                 "#!/usr/bin/env python3\n"

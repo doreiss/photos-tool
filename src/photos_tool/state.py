@@ -101,6 +101,15 @@ def atomic_write_json(path: Path, payload: object) -> None:
     os.replace(tmp, path)
 
 
+def content_signature(path: Path) -> str:
+    """Size + content hash of a file (the same sampling as backup tokens) as one string.
+
+    Used to tell whether a video changed since its MP4 was made (e.g. edited in Photos).
+    """
+    size, _mtime_ns, content = _fingerprint(path)
+    return f"{size}:{content}"
+
+
 def _fingerprint(path: Path) -> tuple[int, int, str]:
     """Content fingerprint of a landed copy: (size, mtime_ns, sha256 of its content).
 

@@ -10,7 +10,7 @@ Run these once on the Windows 10/11 PC that will store the family archive.
 6. Keep guest access off. Windows 11 24H2 disables guest shares and requires SMB signing by default; use the authenticated account.
 7. Find the PC address with `ipconfig` and note the IPv4 address, for example `192.168.1.50`. A router DHCP reservation is recommended.
 8. If the Mac cannot connect, allow File and Printer Sharing for Private networks in Windows Defender Firewall.
-9. For viewing originals on Windows, install HEIF Image Extensions and HEVC Video Extensions from Microsoft Store, or install VLC. Otherwise enable `photos-tool` JPEG/MP4 compatibility copies.
+9. Nothing to install for viewing: by default photos-tool sends JPEG photos and H.264 MP4 videos, which Windows opens as-is. Only if a Mac uses the "Original files" format does the PC need HEIF Image Extensions and HEVC Video Extensions from the Microsoft Store (or VLC).
 
 Verification from the Mac:
 

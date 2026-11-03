@@ -13,12 +13,14 @@ import sys
 import tempfile
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
 from . import __version__, state
 from .config import (
+    EXPORT_FORMATS,
     Config,
     ConfigError,
     default_config_path,
@@ -32,6 +34,7 @@ from .osxphotos_runner import (
     OsxphotosError,
     count_assets,
     is_authorization_error,
+    list_asset_uuids,
     probe_optimize_storage_risk,
     run_export,
 )
@@ -42,12 +45,14 @@ from .report import (
     ReportSummary,
     missing_expected_columns,
     parse_report,
+    parse_reports,
     sanitize_report,
     summarize,
     unexpected_columns,
 )
 from .smb import SmbError, ensure_mounted, is_writable
 from .tooling import ToolStatus, missing_required, probe_all
+from .videos import send_videos
 
 EXIT_OK = 0
 EXIT_PREFLIGHT = 1
@@ -122,8 +127,12 @@ def _cmd_send(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
 
-    jpeg = config.copies.jpeg
-    mp4 = config.copies.mp4
+    # "viewable" sends Windows-playable files as the archive itself (photos as JPEG here, videos
+    # as MP4 via videos.send_videos), so the "original" format's optional compat/ mirror never runs.
+    viewable = config.export.format == "viewable"
+    print(f"Format: {_format_line(config)}")
+    jpeg = config.copies.jpeg and not viewable
+    mp4 = config.copies.mp4 and not viewable
     use_photokit = config.export.use_photokit
     if use_photokit:
         print(
@@ -144,11 +153,9 @@ def _cmd_send(args: argparse.Namespace) -> int:
 
     statuses = probe_all()
     missing = missing_required(statuses)
-    if mp4:
+    if mp4 or viewable:  # both make MP4s with macOS's built-in avconvert
         missing.extend(
-            status
-            for status in statuses
-            if status.tool.name in {"ffmpeg", "ffprobe"} and not status.found
+            status for status in statuses if status.tool.name == "avconvert" and not status.found
         )
     if missing:
         _print_missing_tools(missing)
@@ -159,8 +166,15 @@ def _cmd_send(args: argparse.Namespace) -> int:
         print(f"preflight error: {mount_error}", file=sys.stderr)
         return EXIT_PREFLIGHT
 
+    # "viewable" runs two exports (photos, then videos): read the selection ONCE and run both on
+    # that frozen list, so clicking around in Photos mid-send can't change what gets sent.
+    frozen: list[str] | None = None
     try:
-        selected = count_assets(scope=scope, album=album)
+        if viewable:
+            frozen = list_asset_uuids(scope=scope, album=album)
+            selected = len(frozen)
+        else:
+            selected = count_assets(scope=scope, album=album)
     except (OsxphotosError, ValueError) as exc:
         if is_authorization_error(exc):
             print(
@@ -186,9 +200,14 @@ def _cmd_send(args: argparse.Namespace) -> int:
     exportdb_dir = Path(config.state.exportdb_dir).expanduser()
     exportdb_dir.mkdir(parents=True, exist_ok=True)
     opts = _export_options(config, destination, exportdb_dir, scope, album, use_photokit)
+    video_opts = (
+        _video_export_options(config, destination, exportdb_dir, scope, album, use_photokit)
+        if viewable
+        else None
+    )
 
     if args.dry_run:
-        return _send_dry_run(opts, selected)
+        return _send_dry_run(opts, selected, video_opts, frozen)
 
     # Guard against a double-pressed hotkey launching two overlapping exports on THIS
     # Mac (the lock file lives in the local state dir, so it serializes same-Mac runs
@@ -207,6 +226,8 @@ def _cmd_send(args: argparse.Namespace) -> int:
 
     with tempfile.TemporaryDirectory(prefix="photos-tool-report-") as tmp:
         tmpdir = Path(tmp)
+        if frozen is not None:
+            opts, video_opts = _frozen_options(tmpdir, frozen, opts, video_opts)
         original_report = tmpdir / "original.json"
         result = run_export(opts, original_report)
         if args.verbose:
@@ -225,8 +246,52 @@ def _cmd_send(args: argparse.Namespace) -> int:
             )
             return EXIT_PREFLIGHT
 
+        report_paths = [original_report]
+        video_failures = videos_converted = 0
+        if video_opts is not None:
+            # Catch a broken photo report BEFORE hours of video conversion, not after.
+            photo_problem = _photo_report_problem(original_report)
+            if photo_problem:
+                print(f"report error: {photo_problem}", file=sys.stderr)
+                _write_run_log(
+                    log_dir,
+                    started=started,
+                    exit_code=EXIT_PREFLIGHT,
+                    scope=scope,
+                    selected=selected,
+                    exported=0,
+                    missing=0,
+                    error=0,
+                )
+                return EXIT_PREFLIGHT
+            try:
+                videos = send_videos(video_opts, destination, tmpdir / "videos.json")
+            except (OsxphotosError, ReportError, OSError) as exc:
+                print(f"video export error: {exc}", file=sys.stderr)
+                _write_run_log(
+                    log_dir,
+                    started=started,
+                    exit_code=EXIT_PREFLIGHT,
+                    scope=scope,
+                    selected=selected,
+                    exported=_exported_count(original_report),  # the photo pass did land
+                    missing=0,
+                    error=0,
+                )
+                return EXIT_PREFLIGHT
+            if args.verbose and videos.export is not None:
+                _print_captured(videos.export)
+            report_paths.append(videos.report_path)
+            video_failures = videos.failed
+            videos_converted = videos.converted
+            if videos.converted or videos.reused or videos.failed:
+                print(
+                    f"Videos as MP4: {videos.converted} converted, {videos.reused} already on "
+                    f"the share, {videos.failed} failed."
+                )
+
         try:
-            report = parse_report(original_report)
+            report = parse_reports(report_paths)
             reconciliation = summarize(report, selected)
         except ReportError as exc:
             print(f"report error: {exc}", file=sys.stderr)
@@ -310,7 +375,6 @@ def _cmd_send(args: argparse.Namespace) -> int:
                 convert_summary = convert_videos(
                     destination,
                     destination / "compat",
-                    crf=config.copies.mp4_crf,
                 )
                 print(
                     "MP4 copies into compat/: "
@@ -347,14 +411,24 @@ def _cmd_send(args: argparse.Namespace) -> int:
                 log_dir, destination, config.destination.smb_url, report.exported_paths
             )
 
+        message = reconciliation.message
         if not reconciliation.ok:
-            exit_code = EXIT_RECONCILE
+            # A failed video conversion is an error row, so the batch can't reconcile (and no
+            # token is written) — but say what actually happened, not the iCloud hint.
+            exit_code = EXIT_CONVERSION if video_failures else EXIT_RECONCILE
+            if video_failures:
+                message = (
+                    f"{video_failures} video(s) could not be converted to MP4 and were not backed "
+                    "up; nothing from this send can be cleaned up. Send again, or run doctor."
+                )
+                if report.missing:  # other items were ALSO skipped (e.g. cloud-only): say so too
+                    message += " " + reconciliation.message
         elif unverified:
             exit_code = EXIT_UNVERIFIED
         else:
             exit_code = EXIT_OK
 
-        _print_summary(destination, selected, report, reconciliation.message, unverified=unverified)
+        _print_summary(destination, selected, report, message, unverified=unverified)
         _write_run_log(
             log_dir,
             started=started,
@@ -365,7 +439,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
             missing=report.missing,
             error=report.error,
             converted=jpeg_report.converted if jpeg_report else 0,
-            mp4=convert_summary.transcoded,
+            mp4=convert_summary.transcoded + videos_converted,
             exiftool_error=report.exiftool_error,
             exiftool_warning=report.exiftool_warning,
         )
@@ -381,9 +455,13 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         return EXIT_PREFLIGHT
 
     ok = True
+    print(f"[info] format: {_format_line(config)}")
+    # avconvert is "optional" in general but required whenever this config makes MP4s.
+    makes_mp4 = config.export.format == "viewable" or config.copies.mp4
     statuses = probe_all()
     for status in statuses:
-        label = "pass" if status.found or not status.tool.required else "fail"
+        required = status.tool.required or (status.tool.name == "avconvert" and makes_mp4)
+        label = "pass" if status.found or not required else "fail"
         if label == "fail":
             ok = False
         detail = status.version or status.path or status.tool.purpose
@@ -434,7 +512,9 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
                 None,
                 config.export.use_photokit,
             )
-            risk = probe_optimize_storage_risk(opts)
+            # Gauge every selected item, videos included: the viewable photo pass alone is
+            # --only-photos and would miss cloud-only videos.
+            risk = probe_optimize_storage_risk(replace(opts, only_photos=False))
             label = "warn" if risk >= 0.25 else "pass"
             print(f"[{label}] Optimize Storage dry-run risk: {risk:.0%} missing/error rows")
         except (OsxphotosError, ReportError, ValueError) as exc:
@@ -446,7 +526,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             "how many originals are cloud-only."
         )
 
-    print("[info] Windows: use authenticated SMB, and install HEIF/HEVC codecs or enable copies.")
+    print("[info] Windows: use authenticated SMB (no codecs needed in the viewable format).")
     print("[info] macOS 26: Shared Albums may not be readable by osxphotos yet.")
     return EXIT_OK if ok else EXIT_PREFLIGHT
 
@@ -496,6 +576,7 @@ def _cmd_connect(args: argparse.Namespace) -> int:
             subpath=subpath,
             jpeg=args.jpeg,
             mp4=args.mp4,
+            export_format=_chosen_format(args.format, config_path),
         ),
         encoding="utf-8",
     )
@@ -574,6 +655,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         subpath=subpath,
         jpeg=args.jpeg,
         mp4=args.mp4,
+        export_format=_chosen_format(args.format, config_path),
     )
     if config_path.exists() and not args.force:
         print(f"error: {config_path} already exists; pass --force to overwrite", file=sys.stderr)
@@ -697,6 +779,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--jpeg", action="store_true", help="default to JPEG compatibility copies"
     )
     p_connect.add_argument("--mp4", action="store_true", help="default to MP4 compatibility copies")
+    p_connect.add_argument(
+        "--format",
+        choices=EXPORT_FORMATS,
+        default=None,
+        help=('"viewable": JPEG + MP4 any PC opens (default; an existing config keeps its choice)'),
+    )
     p_connect.add_argument("--force", action="store_true", help="overwrite an existing config")
     p_connect.add_argument(
         "--json", action="store_true", help="machine-readable result for the GUI"
@@ -715,6 +803,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_init.add_argument("--jpeg", action="store_true", help="default to JPEG compatibility copies")
     p_init.add_argument("--mp4", action="store_true", help="default to MP4 compatibility copies")
+    p_init.add_argument(
+        "--format",
+        choices=EXPORT_FORMATS,
+        default=None,
+        help=('"viewable": JPEG + MP4 any PC opens (default; an existing config keeps its choice)'),
+    )
     p_init.add_argument("--force", action="store_true", help="overwrite an existing config")
     p_init.set_defaults(func=_cmd_init)
 
@@ -766,7 +860,7 @@ def _print_missing_tools(missing: Sequence[ToolStatus]) -> None:
     print(f"Missing required tool(s): {names}", file=sys.stderr)
     print(
         "Install with: pip install 'osxphotos==0.76.1' && brew install exiftool"
-        " (and brew install ffmpeg for MP4 copies)",
+        " (avconvert ships with macOS)",
         file=sys.stderr,
     )
 
@@ -950,6 +1044,10 @@ def _export_options(
 ) -> ExportOptions:
     # The compat pass writes a Windows-friendly mirror: stills converted to JPEG,
     # no Live Photo motion movies and no standalone movies (those become MP4s).
+    # format="viewable" makes the MAIN pass the viewable photo archive instead: one JPEG per photo
+    # (the edited version when there is one; no Live motion or RAW). Its videos go through
+    # _video_export_options + videos.send_videos.
+    jpeg_archive = not compat and config.export.format == "viewable"
     return ExportOptions(
         destination=str(destination),
         scope=scope,
@@ -960,27 +1058,124 @@ def _export_options(
         use_photokit=use_photokit,
         touch_file=True,
         retry=config.export.retry,
-        convert_to_jpeg=compat,
+        convert_to_jpeg=compat or jpeg_archive,
         jpeg_quality=config.copies.jpeg_quality,
-        only_photos=compat,
-        skip_live=compat,
+        only_photos=compat or jpeg_archive,
+        skip_live=compat or jpeg_archive,
+        skip_original_if_edited=jpeg_archive,
+        skip_raw=jpeg_archive,
         directory_template=config.export.directory_template,
         filename_template=config.export.filename_template,
     )
 
 
-def _send_dry_run(opts: ExportOptions, selected: int) -> int:
+def _frozen_options(
+    tmpdir: Path,
+    uuids: list[str],
+    opts: ExportOptions,
+    video_opts: ExportOptions | None,
+) -> tuple[ExportOptions, ExportOptions | None]:
+    """Point every pass of this send at the same frozen UUID list (see list_asset_uuids)."""
+    uuid_file = tmpdir / "selection.txt"
+    uuid_file.write_text("".join(f"{uuid}\n" for uuid in uuids), encoding="utf-8")
+    frozen_video = None if video_opts is None else replace(video_opts, uuid_file=str(uuid_file))
+    return replace(opts, uuid_file=str(uuid_file)), frozen_video
+
+
+def _photo_report_problem(report_path: Path) -> str | None:
+    """Why the photo pass's report is unusable, or None. A report with no rows is fine (e.g. a
+    videos-only send); the combined reconcile still checks every item against the selection."""
+    try:
+        photos = parse_report(report_path)
+    except ReportError as exc:
+        return str(exc)
+    gap = missing_expected_columns(photos) if photos.total_files else frozenset()
+    if gap:
+        return f"the osxphotos report is missing required column(s) ({', '.join(sorted(gap))})"
+    return None
+
+
+def _chosen_format(requested: str | None, config_path: Path) -> str:
+    """--format if given; else keep an existing config's choice (a reconnect must never quietly
+    flip "original" to "viewable" — it changes what cleanup deletes against); else the default."""
+    if requested:
+        return requested
+    if config_path.exists():
+        try:
+            return load_config(config_path).export.format
+        except ConfigError:
+            pass
+    return "viewable"
+
+
+def _format_line(config: Config) -> str:
+    if config.export.format == "viewable":
+        return (
+            "viewable — photos as JPEG, videos as H.264 MP4 "
+            '(set export.format = "original" to keep the untouched files)'
+        )
+    return "original — the untouched Apple files"
+
+
+def _exported_count(report_path: Path) -> int:
+    """Best-effort exported-asset count from a report, for the run log only (never for safety)."""
+    try:
+        return len(parse_report(report_path).exported_uuids or ())
+    except ReportError:
+        return 0
+
+
+def _video_export_options(
+    config: Config,
+    destination: Path,
+    exportdb_dir: Path,
+    scope: str,
+    album: str | None,
+    use_photokit: bool,
+) -> ExportOptions:
+    # The "viewable" format's video pass (videos.send_videos): videos only, the edited version
+    # when there is one, exported plain into a local scratch dir. No exiftool rewrite there, so the
+    # copy stays an APFS clone (~no disk space); convert.make_viewable_mp4 copies the source's own
+    # tags (date, GPS, camera) onto the MP4. Destination/exportdb are replaced with scratch paths.
+    base = _export_options(config, destination, exportdb_dir, scope, album, use_photokit)
+    return replace(
+        base,
+        update=False,
+        exiftool=False,
+        convert_to_jpeg=False,
+        only_photos=False,
+        only_movies=True,
+        skip_live=False,
+        skip_raw=False,
+        skip_original_if_edited=True,
+    )
+
+
+def _send_dry_run(
+    opts: ExportOptions,
+    selected: int,
+    video_opts: ExportOptions | None = None,
+    frozen: list[str] | None = None,
+) -> int:
     with tempfile.TemporaryDirectory(prefix="photos-tool-dry-run-") as tmp:
+        if frozen is not None:
+            opts, video_opts = _frozen_options(Path(tmp), frozen, opts, video_opts)
         report_path = Path(tmp) / "report.json"
         result = run_export(opts, report_path, dry_run=True)
         if not result.ok:
             print(f"dry run failed with exit {result.returncode}", file=sys.stderr)
             _print_captured(result)
             return EXIT_PREFLIGHT
+        report_paths = [report_path]
         try:
-            report = parse_report(report_path)
+            if video_opts is not None:  # what the video pass would export (nothing converted)
+                videos = send_videos(
+                    video_opts, Path(opts.destination), Path(tmp) / "videos.json", dry_run=True
+                )
+                report_paths.append(videos.report_path)
+            report = parse_reports(report_paths)
             reconciliation = summarize(report, selected)
-        except ReportError as exc:
+        except (ReportError, OsxphotosError, OSError) as exc:
             print(f"report error: {exc}", file=sys.stderr)
             return EXIT_PREFLIGHT
         _print_summary(
@@ -1091,7 +1286,7 @@ def _status_message(exit_code: int) -> str:
         EXIT_RECONCILE: "Some photos were skipped (often iCloud cloud-only originals).",
         EXIT_UNVERIFIED: "Some photos did not reach the share; not confirmed backed up.",
         EXIT_NOTHING_SELECTED: "Nothing was selected.",
-        EXIT_CONVERSION: "Photos sent, but a compatibility (JPEG/MP4) copy failed.",
+        EXIT_CONVERSION: "A JPEG/MP4 conversion failed; nothing from this send can be cleaned up.",
     }.get(exit_code, f"Send ended with code {exit_code}.")
 
 
@@ -1171,7 +1366,15 @@ def _default_mount_point(smb_url: str) -> str:
     return f"/Volumes/{share}" if share else ""
 
 
-def _render_config(smb_url: str, mount_point: str, subpath: str, *, jpeg: bool, mp4: bool) -> str:
+def _render_config(
+    smb_url: str,
+    mount_point: str,
+    subpath: str,
+    *,
+    jpeg: bool,
+    mp4: bool,
+    export_format: str = "viewable",
+) -> str:
     return f"""[destination]
 smb_url = {json.dumps(smb_url)}
 mount_point = {json.dumps(mount_point)}
@@ -1183,12 +1386,13 @@ filename_template = "{{original_name}}"
 download_missing = true
 use_photokit = false
 retry = 3
+# "viewable": JPEG photos + H.264 MP4 videos any Windows PC opens; "original": the untouched files.
+format = {json.dumps(export_format)}
 
 [copies]
 jpeg = {str(jpeg).lower()}
 jpeg_quality = 0.9
 mp4 = {str(mp4).lower()}
-mp4_crf = 20
 
 [state]
 exportdb_dir = "~/.local/state/photos-tool/exportdb"

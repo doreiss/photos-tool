@@ -45,7 +45,7 @@ Expected exit codes:
 | 2 | bad arguments or config |
 | 3 | export ran but some assets were skipped or errored |
 | 4 | nothing selected |
-| 5 | a compatibility copy (JPEG or MP4) failed after the originals exported |
+| 5 | a JPEG/MP4 conversion failed (in the default "viewable" format, that item was **not** backed up); no cleanup is armed |
 | 6 | osxphotos reported the export, but re-verifying the share found copies missing/empty/changed — originals are NOT confirmed on the share (not a clean success) |
 
 ## Test album
@@ -62,10 +62,10 @@ Create a small album with about 10 items:
 
 1. Run `photos-tool doctor`. Expected: required tools pass, the share is writable, Photos is readable, and any Optimize Storage risk is explicit.
 2. Select the album items in Photos and run `photos-tool send --dry-run`. Expected: the selected count looks right, no files are written, and Optimize Storage warnings appear only for expected cloud-only items.
-3. Run `photos-tool send`. Expected on Windows: files land under `<share>\<this-mac>\<year>\<month>\...` (note the per-Mac subfolder); the Live Photo appears as a still plus `.MOV`; the standalone video is present.
-4. Check metadata on the Mac copy or Windows copy with `exiftool -G1 -time:all -gps:all <file>`. Expected: photo dates/GPS and video QuickTime creation dates are present.
-5. Enable compatibility copies once in config (`photos-tool init --jpeg --mp4`, or set `[copies] jpeg = true` and `mp4 = true` in the TOML — copies are config-only, not per-run flags), then run `photos-tool send`. Expected: the `compat/` tree under your Mac's subfolder holds a `.jpeg` for every still and a `.mp4` for every standalone HEVC video, and **nothing else** — no `.heic`, no `.mov`. The main tree still holds only the originals. On Windows, every file under `compat/` opens without extra codecs.
-6. Run `photos-tool send` again with the same selection. Expected: no duplicate archive files; the report shows skipped/current rows; MP4 copies report "already current".
+3. Run `photos-tool send` (default "viewable" format). Expected on Windows: files land under `<share>\<this-mac>\<year>\<month>\...` (note the per-Mac subfolder); every photo is a `.jpeg` (the edited version if edited; the Live Photo is a still only) and the standalone video is an `.mp4` — all open in Windows Photos with no add-ons. No `.heic` or `.mov` on the share.
+4. Check metadata on the Windows copy with `exiftool -G1 -time:all -gps:all <file>`. Expected: photo dates/GPS and the video's original capture date (not the send time) are present; `exiftool -CompressorID <video>.mp4` reports `avc1` (H.264).
+5. **"original" format only:** set `[export] format = "original"`, then enable compatibility copies once in config (`photos-tool init --jpeg --mp4`, or set `[copies] jpeg = true` and `mp4 = true` in the TOML — copies are config-only, not per-run flags), then run `photos-tool send`. Expected: the `compat/` tree under your Mac's subfolder holds a `.jpeg` for every still and a `.mp4` for every standalone HEVC video, and **nothing else** — no `.heic`, no `.mov`. The main tree still holds only the originals. On Windows, every file under `compat/` opens without extra codecs.
+6. Run `photos-tool send` again with the same selection. Expected: no duplicate files; the report shows skipped/current rows; in "viewable" the video line reports it "already on the share" (not converted again).
 7. Select a known cloud-only item and run `photos-tool send`. Expected: exit code 3 and a clear message about skipped items and Download Originals.
 8. **Menu-bar app:** run `photos-tool-menubar`, select photos in Photos, click 📷 → Send Selected Photos. Expected: a notification ("Photos sent" / "Some photos were skipped" / "Nothing selected") matching the CLI exit code.
 9. **Mac-side cleanup (opt-in, recoverable, a separate step from backup):** after a successful `photos-tool send`, run `photos-tool cleanup-last --dry-run`. Expected: it reports "Would move N backed-up original(s) to Recently Deleted … Nothing was deleted" (grant Photos access first if it says it is not authorized). Only originals whose backup copy is re-verified present **and byte-for-byte unchanged** on the share are eligible. Then, on a *throwaway* test batch, run `photos-tool cleanup-last` and confirm: the items move to Photos → Recently Deleted (recoverable ~30 days), the share copies remain intact, and a second `cleanup-last` reports "No backup recorded" (the token is consumed, so a batch can never be offered twice).

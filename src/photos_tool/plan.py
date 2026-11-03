@@ -17,6 +17,9 @@ class ExportOptions:
     destination: str
     scope: str = "selected"  # "selected" (the live Photos selection) or "album"
     album: str | None = None
+    # A frozen list of UUIDs (one per line); when set it REPLACES the scope/album filter, so several
+    # passes of one send all export exactly the same assets.
+    uuid_file: str | None = None
     update: bool = True
     exportdb: str | None = None
     exiftool: bool = True
@@ -28,7 +31,10 @@ class ExportOptions:
     jpeg_quality: float = 0.9
     jpeg_ext: str = "jpeg"
     only_photos: bool = False
+    only_movies: bool = False
     skip_live: bool = False
+    skip_original_if_edited: bool = False  # export only the edited version when one exists
+    skip_raw: bool = False  # drop the RAW half of a RAW+JPEG pair
     directory_template: str = "{created.year}/{created.mm}"
     filename_template: str = "{original_name}"
 
@@ -37,13 +43,15 @@ def build_export_command(opts: ExportOptions) -> list[str]:
     """Translate :class:`ExportOptions` into an ``osxphotos`` argv list."""
     if not opts.destination:
         raise ValueError("destination is required")
-    if opts.scope != "selected" and not opts.album:
+    if not opts.uuid_file and opts.scope != "selected" and not opts.album:
         raise ValueError("specify the live selection (scope='selected') or an album name")
 
     cmd = ["osxphotos", "export", opts.destination]
-    if opts.scope == "selected":
+    if opts.uuid_file:
+        cmd += ["--uuid-from-file", opts.uuid_file]
+    elif opts.scope == "selected":
         cmd.append("--selected")
-    if opts.album:
+    elif opts.album:
         cmd += ["--album", opts.album]
     if opts.update:
         cmd.append("--update")
@@ -65,7 +73,13 @@ def build_export_command(opts: ExportOptions) -> list[str]:
             cmd += ["--jpeg-ext", opts.jpeg_ext]
     if opts.only_photos:
         cmd.append("--only-photos")
+    if opts.only_movies:
+        cmd.append("--only-movies")
     if opts.skip_live:
         cmd.append("--skip-live")
+    if opts.skip_original_if_edited:
+        cmd.append("--skip-original-if-edited")
+    if opts.skip_raw:
+        cmd.append("--skip-raw")
     cmd += ["--directory", opts.directory_template, "--filename", opts.filename_template]
     return cmd

@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -111,14 +111,24 @@ class ReportSummary:
 
 
 def parse_report(path: Path) -> ReportSummary:
+    return parse_reports([path])
+
+
+def parse_reports(paths: Sequence[Path]) -> ReportSummary:
+    """One summary over several reports' rows (e.g. the photo pass + the video pass of a send).
+
+    Every row keeps its own uuid, so a send split across passes reconciles as one batch.
+    """
+    return summarize_rows(row for path in paths for row in load_report_rows(path))
+
+
+def load_report_rows(path: Path) -> list[dict[str, Any]]:
     suffix = path.suffix.lower()
     if suffix == ".json":
-        rows = _load_json_rows(path)
-    elif suffix == ".csv":
-        rows = _load_csv_rows(path)
-    else:
-        raise ReportError(f"unsupported report format for {path}; use .json or .csv")
-    return summarize_rows(rows)
+        return _load_json_rows(path)
+    if suffix == ".csv":
+        return _load_csv_rows(path)
+    raise ReportError(f"unsupported report format for {path}; use .json or .csv")
 
 
 def sanitize_report(source: Path, target: Path) -> None:

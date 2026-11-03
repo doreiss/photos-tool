@@ -22,25 +22,50 @@ Photos app (select) -> menu-bar / hotkey -> photos-tool -> osxphotos export -> m
 
 - `osxphotos export --selected` reads whatever is highlighted in Photos right now.
 - `--update` makes it incremental and resumable (never re-copies what's already sent).
-- `--exiftool` embeds EXIF / GPS / dates; Live Photos and videos export by default.
+- `--exiftool` embeds EXIF / GPS / dates.
+- By default everything is made **Windows-viewable**: photos become JPEG and videos become H.264
+  MP4 (via macOS's built-in `avconvert` — no ffmpeg), so any Windows PC opens them as-is.
 - A clean, selected-vs-exported reconciliation by UUID catches silently-skipped
   iCloud photos and reports them (exit code 3) instead of a false success.
 
 ### What lands on the share
 
 Each Mac writes to its **own** subfolder (named after the Mac) so photos from two
-iPhones can't collide on names like `IMG_0001`:
+iPhones can't collide on names like `IMG_0001`. There are two formats, chosen once in
+*"Set up connection…"* (or `[export] format` in the config):
+
+**`viewable` (the default)** — everything opens on a stock Windows PC:
 
 ```
-<share>/<this-mac>/2024/06/IMG_0001.heic          # pristine Apple originals (the archive)
+<share>/<this-mac>/2024/06/IMG_0001.jpeg          # a photo (the edited version, if edited)
+<share>/<this-mac>/2024/09/IMG_0003.mp4           # a video, as H.264 MP4
+```
+
+- **Photos** become one JPEG each — the **edited** version when there is one — with no Live Photo
+  motion or RAW. Date, GPS, keywords and people are embedded.
+- **Videos** become one H.264 MP4 each (the edited version when there is one) at their original
+  resolution: HEVC/HDR clips are converted with Apple's hardware encoder, H.264 clips are
+  repackaged losslessly. Capture date, GPS and camera are copied back onto the MP4. Each MP4 is
+  stamped with its Photos ID, so re-sending skips videos already on the share and two different
+  clips with the same name can never be mistaken for each other.
+- Cleanup verifies and deletes the Mac originals **against these copies**, so this format
+  deliberately trades the original files — and Live Photo motion, HDR/depth, and Photos' edit
+  history — for files any PC can open. JPEG/MP4 are typically larger than HEIC/HEVC.
+- A video edited in Photos *after* it was sent gets its MP4 remade on the next send. Each send
+  reads your selection once, so clicking around in Photos mid-send can't change what is sent.
+
+**`original`** — the untouched Apple files (the archive):
+
+```
+<share>/<this-mac>/2024/06/IMG_0001.heic          # pristine Apple originals
 <share>/<this-mac>/2024/08/IMG_0002.heic + .mov   # Live Photo pair
 <share>/<this-mac>/compat/2024/06/IMG_0001.jpeg   # optional Windows-friendly mirror
 <share>/<this-mac>/compat/2024/09/VID_0003.mp4    #   (point Windows Explorer here)
 ```
 
-The optional `compat/` tree (enable JPEG/MP4 copies in config) is a fully Windows-openable mirror —
-JPEG for every still, H.264 MP4 for every standalone HEVC video, no HEVC `.mov` — so a
-Windows PC with no codecs can browse `compat/` while the main tree stays original.
+The optional `compat/` mirror (`[copies] jpeg/mp4 = true`) adds a JPEG for every still and an H.264
+MP4 for every standalone HEVC video, while the main tree stays original. Windows needs Microsoft's
+HEIF/HEVC extensions to open the originals themselves.
 
 ## Install
 
@@ -55,14 +80,10 @@ persist across rebuilds — full steps in **[docs/app-install.md](docs/app-insta
 ./scripts/build-app.sh --install      # bundles exiftool, signs, installs to /Applications
 ```
 
-ffmpeg is optional (only for compatibility MP4 copies); install it with `brew install ffmpeg` if
-you want those.
-
 ### B. Developer / CLI (pip / uv)
 
 ```bash
 brew install exiftool          # required for the CLI path (the .app bundles its own)
-brew install ffmpeg            # optional, only for MP4 video copies
 
 uv tool install photos-tool                 # recommended (or: pipx install photos-tool)
 uv tool install 'photos-tool[gui]'          # ...with the 📷 menu-bar app
@@ -104,7 +125,7 @@ Then `photos-tool doctor` should be all green.
   (it stays responsive while exporting; a second click is ignored until the first finishes).
 - **Hotkey:** `photos-tool install-shortcut` writes a launcher; put it in a one-action
   macOS Shortcut and bind a key. The notification maps the exit code to plain English.
-- **Terminal:** `photos-tool send` (JPEG/MP4 copies are config settings, set once at init).
+- **Terminal:** `photos-tool send` (the format and any copies are config settings, set once).
 
 ### Free space on the Mac after a backup (opt-in, recoverable)
 
@@ -122,8 +143,8 @@ photos-tool cleanup-last               # 3b. move that batch's originals to Rece
 In the **menu-bar app**: use *"Clean up last backup…"* anytime. It first reveals a
 real backed-up file in Finder so you can confirm the photos arrived, then offers to
 move that batch's originals to Recently Deleted — a deliberate, separate step from the
-backup, never automatic. JPEG/MP4 copies are config-only (set once at init in the
-TOML), so the menu exposes no per-run toggles.
+backup, never automatic. The format and JPEG/MP4 copies are config-only (set once at setup),
+so the menu exposes no per-run toggles.
 
 Either way it only acts on a clean backup, deletes **exactly** the batch's photos and
 **only those re-verified present and non-empty on the share**, aborts if any don't
@@ -163,7 +184,7 @@ CI runs on GitHub's macOS runners, which are genuinely Apple Silicon (arm64):
 - ✅ The wrapper logic — config, report parsing, command construction, SMB checks,
   conversion selection, the UUID reconciliation, the cleanup gate, and the GUI's
   exit-code mapping — is unit-tested and type-checked.
-- ✅ The full `send` pipeline runs with fake `osxphotos`/`ffmpeg`/`exiftool`/`mount`/
+- ✅ The full `send` pipeline runs with fake `osxphotos`/`avconvert`/`exiftool`/`mount`/
   `osascript` binaries, plus marker-gated real-tool tests on macOS.
 
 It deliberately does **not** test the end-to-end export (no Photos library, no GUI
@@ -191,6 +212,8 @@ environment `pypi`) before the first tag.
 - [x] Tool detection, export-command builder, UUID reconciliation.
 - [x] `send`: export, parse the osxphotos report, reconcile, run log.
 - [x] Coherent `compat/` mirror (JPEG stills + H.264 MP4s); pristine originals tree.
+- [x] Windows-viewable format by default: JPEG photos + H.264 MP4 videos via macOS's built-in
+      `avconvert` (no ffmpeg), stamped with their Photos ID for safe re-sends.
 - [x] Per-Mac subpath so several Macs share one Windows folder safely.
 - [x] Opt-in Mac-side cleanup (move exported originals to Recently Deleted).
 - [x] 📷 menu-bar app; macOS Shortcut + hotkey; documented manual smoke test.

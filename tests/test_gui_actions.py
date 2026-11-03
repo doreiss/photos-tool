@@ -240,6 +240,8 @@ def test_build_connect_argv_includes_json_and_force():
         "smb://pc/Share",
         "--config",
         "/c.toml",
+        "--format",
+        "viewable",
         "--json",
         "--force",
     ]
@@ -280,3 +282,62 @@ def test_working_title_formats_elapsed_clock():
     assert working_title(65) == f"{WORKING_GLYPH} 1:05"
     assert working_title(3725) == f"{WORKING_GLYPH} 62:05"  # past an hour: minutes keep counting
     assert working_title(-3) == f"{WORKING_GLYPH} 0:00"  # clamps a negative clock to zero
+
+
+def test_setup_format_choice_maps_buttons_and_reaches_connect():
+    # The setup dialog's button decides export.format; a dismissed dialog must change nothing.
+    from photos_tool.gui_actions import (
+        FORMAT_BUTTON_ORIGINAL,
+        FORMAT_BUTTON_VIEWABLE,
+        build_connect_argv,
+        format_for_choice,
+    )
+
+    assert format_for_choice(FORMAT_BUTTON_VIEWABLE) == "viewable"
+    assert format_for_choice(FORMAT_BUTTON_ORIGINAL) == "original"
+    assert format_for_choice(None) is None
+    assert format_for_choice("something else") is None
+    argv = build_connect_argv(["pt"], "smb://pc/Share", export_format="original")
+    assert argv[argv.index("--format") + 1] == "original"
+
+
+def test_conversion_failure_message_never_claims_a_backup():
+    # In "viewable" a failed conversion means that item was NOT backed up; the message must not
+    # say "your originals were sent" (the old compat-copy wording).
+    note = map_exit_code(cli.EXIT_CONVERSION)
+    assert "originals were sent" not in note.message
+    assert "removed" in note.message
+
+
+def test_dialog_scripts_quote_safely_and_compile():
+    import shutil
+    import subprocess
+
+    from photos_tool.gui_actions import (
+        FORMAT_BUTTON_ORIGINAL,
+        FORMAT_BUTTON_VIEWABLE,
+        FORMAT_PROMPT_TEXT,
+        FORMAT_PROMPT_TITLE,
+        applescript_quote,
+        choice_dialog_script,
+        text_dialog_script,
+    )
+
+    assert applescript_quote('say "hi" \\ bye') == '"say \\"hi\\" \\\\ bye"'
+    scripts = [
+        text_dialog_script('Address "with quotes"', "Title", default="smb://"),
+        choice_dialog_script(
+            FORMAT_PROMPT_TEXT,
+            FORMAT_PROMPT_TITLE,
+            [FORMAT_BUTTON_ORIGINAL, FORMAT_BUTTON_VIEWABLE],
+            FORMAT_BUTTON_VIEWABLE,
+        ),
+    ]
+    osacompile = shutil.which("osacompile")
+    if osacompile is None:  # not macOS (CI's Linux leg): quoting is still checked above
+        return
+    for script in scripts:  # compile only — never shows a dialog
+        result = subprocess.run(
+            [osacompile, "-e", script, "-o", "/dev/null"], capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr

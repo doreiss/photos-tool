@@ -387,7 +387,12 @@ def test_second_send_blocks_only_its_own_destination_not_others(tmp_path, fake_t
     exports = [
         e["argv"] for e in tools.log() if e["tool"] == "osxphotos" and e["argv"][:1] == ["export"]
     ]
-    assert len(exports) == 1  # only B's export ran; A never started
+    # Only B's send exported anything; A never started. (B may make more than one export call —
+    # the viewable format runs a photo pass and a video pass — but none may target A.)
+    destinations = [Path(argv[1]) for argv in exports]
+    assert destinations
+    assert not any(d == mount_a or mount_a in d.parents for d in destinations)
+    assert any(d == mount_b for d in destinations)
 
 
 # --- 7. config repoint (smb_url changed) between backup and cleanup -> refuse -------------------

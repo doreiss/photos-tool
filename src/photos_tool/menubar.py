@@ -38,21 +38,28 @@ from typing import Any
 from ._frozen import bundled_exiftool_dir, is_pyinstaller_bundle
 from .config import DEFAULT_STATE_DIR, default_config_path
 from .gui_actions import (
+    FORMAT_BUTTON_ORIGINAL,
+    FORMAT_BUTTON_VIEWABLE,
+    FORMAT_PROMPT_TEXT,
+    FORMAT_PROMPT_TITLE,
     IDLE_GLYPH,
     SETUP_PROMPT_TEXT,
     SETUP_PROMPT_TITLE,
     WORKING_GLYPH,
     build_connect_argv,
     build_send_argv,
+    choice_dialog_script,
     confirm_delete_message,
     confirm_reveal_message,
     connect_failure_message,
     connect_success_message,
+    format_for_choice,
     map_exit_code,
     parse_cleanup_query,
     parse_connect_result,
     send_action_for_automation_status,
     status_glyph,
+    text_dialog_script,
     working_title,
 )
 
@@ -379,20 +386,21 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
             return True
 
         def _ask_text(self, prompt: str, title: str, default: str = "") -> str | None:
-            """Native text prompt via osascript — reliably typeable for a menu-bar agent.
+            """Native text prompt — reliably typeable for a menu-bar agent.
 
             rumps.Window/NSAlert text fields never get keyboard focus when the app is a
             menu-bar (accessory) agent, so collect input through macOS's OWN dialog instead.
             Returns the entered text, or None if the user cancelled or left it empty.
             """
+            return self._run_dialog(text_dialog_script(prompt, title, default))
 
-            def q(value: str) -> str:
-                return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        def _ask_choice(
+            self, prompt: str, title: str, buttons: list[str], default: str
+        ) -> str | None:
+            """Native button dialog (same reason as _ask_text); the button's label, or None."""
+            return self._run_dialog(choice_dialog_script(prompt, title, buttons, default))
 
-            script = (
-                f"text returned of (display dialog {q(prompt)} "
-                f"default answer {q(default)} with title {q(title)})"
-            )
+        def _run_dialog(self, script: str) -> str | None:
             try:
                 proc = subprocess.run(
                     ["/usr/bin/osascript", "-e", script],
@@ -403,7 +411,7 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
                 )
             except OSError:
                 return None
-            if proc.returncode != 0:  # user cancelled
+            if proc.returncode != 0:  # cancelled, or the dialog couldn't be shown
                 return None
             return proc.stdout.strip() or None
 
@@ -496,8 +504,19 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
             ):
                 return
             smb_url = self._ask_text(SETUP_PROMPT_TEXT, SETUP_PROMPT_TITLE, default="smb://")
-            if smb_url and smb_url != "smb://":
-                self._start("connect", smb_url=smb_url)
+            if not smb_url or smb_url == "smb://":
+                return
+            export_format = format_for_choice(
+                self._ask_choice(
+                    FORMAT_PROMPT_TEXT,
+                    FORMAT_PROMPT_TITLE,
+                    [FORMAT_BUTTON_ORIGINAL, FORMAT_BUTTON_VIEWABLE],
+                    default=FORMAT_BUTTON_VIEWABLE,
+                )
+            )
+            if export_format is None:
+                return  # dialog dismissed: change nothing
+            self._start("connect", smb_url=smb_url, export_format=export_format)
 
         def _drain(self, _timer: Any) -> None:
             """Sole place that touches rumps UI from queue results (main thread)."""
@@ -615,17 +634,21 @@ def main() -> None:  # pragma: no cover - requires a GUI run loop and rumps
                     elif kind == "doctor":
                         self._results.put(self._do_doctor())
                     elif kind == "connect":
-                        self._results.put(self._do_connect(job.get("smb_url", "")))
+                        self._results.put(
+                            self._do_connect(
+                                job.get("smb_url", ""), job.get("export_format", "viewable")
+                            )
+                        )
                 except Exception as exc:  # never let the worker die
                     self._results.put({"kind": "error", "title": "Error", "message": str(exc)})
 
-        def _do_connect(self, smb_url: str) -> dict[str, Any]:
+        def _do_connect(self, smb_url: str, export_format: str) -> dict[str, Any]:
             # Runs `photos-tool connect`, which triggers macOS's OWN mount/auth dialog
             # (password -> Keychain, never seen here). The worker blocks on that dialog;
             # the menu bar stays responsive.
             try:
                 proc = subprocess.run(
-                    build_connect_argv(cli_prefix, smb_url),
+                    build_connect_argv(cli_prefix, smb_url, export_format=export_format),
                     env=env,
                     capture_output=True,
                     text=True,

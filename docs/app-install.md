@@ -9,9 +9,7 @@ Two ways to use it:
 - **Same Mac** — you build *and* run backups on this Mac: do sections 1–4 below.
 - **A different / fresh Mac runs the backups** (e.g. a family MacBook) — you do NOT need Xcode,
   Homebrew, Python, or the cert on that Mac. Build + sign **once** on your dev Mac (sections 1–3),
-  then copy the signed `dist/photos-tool.app` to the other Apple-Silicon Mac (AirDrop, a USB drive,
-  or zip it) and do **only section 4** there. The signature self-validates offline and the macOS
-  grants are per-Mac (granted once locally), so the received `.app` just works — see section 5.
+  run `./scripts/package-dmg.sh`, and send them `dist/photos-tool.dmg` — see section 5.
 
 ## 1. One-time build environment
 
@@ -60,7 +58,9 @@ manual approval:
 2. **Login Items:** System Settings → General → Login Items → add photos-tool (so it starts at login).
 3. **Full Disk Access** (the one grant macOS never prompts for): System Settings → Privacy &
    Security → Full Disk Access → enable photos-tool → **quit and reopen** the app.
-4. **Set up connection:** click the 📷 menu → *Set up connection…* → enter `smb://<pc>/<share>`
+4. **Set up connection:** click the 📷 menu → *Set up connection…* → enter `smb://<pc>/<share>` and
+   choose the format (*Viewable*, the default, or *Original files*; see the README's "What lands on
+   the share")
    (macOS's own dialog handles the password into your Keychain; the tool never sees it).
 5. **Automation → Photos:** the first **Send Selected Photos** pops *"photos-tool" wants to
    control "Photos"* → **Allow** (this lets it read your selection).
@@ -75,14 +75,20 @@ confirm every check is green.
 
 When the backups run on a *different* Apple-Silicon Mac than the one you built on, that Mac needs
 nothing from Homebrew/Python/Xcode — the bundle is self-contained (its own Python, exiftool, and
-osxphotos). On the fresh Mac:
+osxphotos). The cert's private key is **not** needed there either: the signature self-validates
+offline, and TCC grants are per-Mac, so that Mac grants once and they persist across updates.
 
-1. Copy the signed `photos-tool.app` over (AirDrop / USB / unzip) into `/Applications`.
-2. Skip the `tccutil reset` in section 3 — that migration is only for a Mac that previously ran an
-   *ad-hoc*-signed build. A fresh Mac has no prior grants to clear.
-3. Do section 4 (right-click → Open, Login Items, Full Disk Access, set up the connection, then the
-   first Send and first Clean up grants). The cert's private key is **not** needed at runtime — the
-   signature self-validates offline — and TCC grants are per-Mac, so this Mac grants once and they
-   persist here too.
-4. Run *Run Diagnostics* and confirm the bundled osxphotos and exiftool resolve (proves the bundle
-   is self-contained on a machine with no Homebrew).
+On your Mac, after `./scripts/build-app.sh`:
+
+```bash
+./scripts/package-dmg.sh   # -> dist/photos-tool.dmg (app + Applications shortcut + setup guide)
+```
+
+Send the `.dmg` by AirDrop or via the share. It contains **Read Me First.txt**
+([docs/family-guide.md](family-guide.md)), a plain-language walkthrough of section 4 for the
+recipient. They skip the `tccutil reset` in section 3: it only applies to a Mac that previously ran
+an *ad-hoc*-signed build.
+
+To ship an update later, rebuild, re-run `package-dmg.sh`, and have them replace the app in
+`/Applications`. Their Full Disk Access / Automation / Photos grants carry over because the stable
+signing identity is unchanged (macOS may ask for the "Open Anyway" approval again for the new copy).

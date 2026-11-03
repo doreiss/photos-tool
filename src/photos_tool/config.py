@@ -23,6 +23,14 @@ except ModuleNotFoundError:  # pragma: no cover
 DEFAULT_DIRECTORY_TEMPLATE = "{created.year}/{created.mm}"
 DEFAULT_FILENAME_TEMPLATE = "{original_name}"
 DEFAULT_STATE_DIR = "~/.local/state/photos-tool"
+# What lands on the share. "viewable" (default): everything opens on a stock Windows PC — one
+# JPEG per photo (the edited version when there is one; no Live Photo motion or RAW) and one H.264
+# MP4 per video (the edited version when there is one). "original": the untouched Apple files plus
+# any edited version and Live Photo motion. Cleanup deletes the Mac originals against whatever was
+# sent, so "viewable" deliberately trades the original files for files any PC can open.
+EXPORT_FORMATS = ("viewable", "original")
+# The interim name for "viewable" (JPEG-only, before videos were converted), still accepted.
+_FORMAT_ALIASES = {"jpeg": "viewable"}
 
 
 class ConfigError(ValueError):
@@ -43,6 +51,7 @@ class ExportConfig:
     download_missing: bool = True
     use_photokit: bool = False
     retry: int = 3
+    format: str = "viewable"  # one of EXPORT_FORMATS
 
 
 @dataclass(frozen=True)
@@ -50,7 +59,6 @@ class CopiesConfig:
     jpeg: bool = False
     jpeg_quality: float = 0.9
     mp4: bool = False
-    mp4_crf: int = 20
 
 
 @dataclass(frozen=True)
@@ -148,12 +156,17 @@ def _parse_export(raw: dict[str, Any]) -> ExportConfig:
     retry = _int(raw, "retry", 3)
     if retry < 0:
         raise ConfigError("export.retry must be non-negative")
+    export_format = _str(raw, "format", "viewable")
+    export_format = _FORMAT_ALIASES.get(export_format, export_format)
+    if export_format not in EXPORT_FORMATS:
+        raise ConfigError(f"export.format must be one of: {', '.join(EXPORT_FORMATS)}")
     return ExportConfig(
         directory_template=_str(raw, "directory_template", DEFAULT_DIRECTORY_TEMPLATE),
         filename_template=_str(raw, "filename_template", DEFAULT_FILENAME_TEMPLATE),
         download_missing=_bool(raw, "download_missing", True),
         use_photokit=_bool(raw, "use_photokit", False),
         retry=retry,
+        format=export_format,
     )
 
 
@@ -161,14 +174,10 @@ def _parse_copies(raw: dict[str, Any]) -> CopiesConfig:
     jpeg_quality = _float(raw, "jpeg_quality", 0.9)
     if not 0 <= jpeg_quality <= 1:
         raise ConfigError("copies.jpeg_quality must be between 0.0 and 1.0")
-    mp4_crf = _int(raw, "mp4_crf", 20)
-    if not 0 <= mp4_crf <= 51:
-        raise ConfigError("copies.mp4_crf must be between 0 and 51")
     return CopiesConfig(
         jpeg=_bool(raw, "jpeg", False),
         jpeg_quality=jpeg_quality,
         mp4=_bool(raw, "mp4", False),
-        mp4_crf=mp4_crf,
     )
 
 
